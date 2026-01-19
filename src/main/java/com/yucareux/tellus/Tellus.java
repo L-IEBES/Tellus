@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
 import com.yucareux.tellus.integration.distant_horizons.DistantHorizonsIntegration;
@@ -15,6 +16,9 @@ import com.yucareux.tellus.world.realtime.TellusRealtimeState;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Objects;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.api.ModInitializer;
@@ -118,14 +122,37 @@ public class Tellus implements ModInitializer {
 		);
 		ServerPlayNetworking.registerGlobalReceiver(GeoTpTeleportPayload.TYPE, Tellus::handleGeoTeleport);
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-			dispatcher.register(Commands.literal("geotp")
+			dispatcher.register(Commands.literal("tellus")
 					.then(Commands.literal("map")
 							.requires(source -> source.permissions()
 									.hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
-							.executes(context -> openGeoTpMap(context.getSource()))));
-			dispatcher.register(Commands.literal("tellus")
+							.executes(context -> openGeoTpMap(context.getSource())))
 					.then(Commands.literal("weather")
-							.executes(context -> showTellusWeather(context.getSource()))));
+							.executes(context -> showTellusWeather(context.getSource())))
+					.then(Commands.literal("config")
+							.requires(source -> source.permissions()
+									.hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+							.then(Commands.literal("weather")
+									.then(Commands.literal("enable_realtime_time")
+											.then(Commands.argument(
+													"enabled",
+													Objects.requireNonNull(BoolArgumentType.bool(), "enabledArgument")
+											)
+													.executes(context -> setRealtimeTimeOverride(
+															context.getSource(),
+															BoolArgumentType.getBool(context, "enabled")
+													))))
+									.then(Commands.literal("enable_realtime_weather")
+											.then(Commands.argument(
+													"enabled",
+													Objects.requireNonNull(BoolArgumentType.bool(), "enabledArgument")
+											)
+													.executes(context -> setRealtimeWeatherOverride(
+															context.getSource(),
+															BoolArgumentType.getBool(context, "enabled")
+													))))
+							)
+					));
 		});
 
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
@@ -190,26 +217,15 @@ public class Tellus implements ModInitializer {
 		double latitude = clampLatitude(earthGenerator.latitudeFromBlock(pos.getZ()));
 		double longitude = clampLongitude(earthGenerator.longitudeFromBlock(pos.getX()));
 
-		boolean realtimeTime = earthGenerator.settings().realtimeTime();
-		boolean realtimeWeather = earthGenerator.settings().realtimeWeather();
+		EarthGeneratorSettings settings = earthGenerator.settings();
+		boolean realtimeTime = REALTIME_MANAGER.isRealtimeTimeEnabled(settings);
+		boolean realtimeWeather = REALTIME_MANAGER.isRealtimeWeatherEnabled(settings);
 		boolean realtimeWeatherActive = realtimeWeather && TellusRealtimeState.isWeatherEnabled();
 
 		TellusRealtimeState.PrecipitationMode mode = TellusRealtimeState.precipitationMode();
 		WeatherDisplay weather = realtimeWeatherActive
 				? weatherFromRealtime(mode)
 				: weatherFromVanilla(level, pos);
-
-		int offsetSeconds;
-		boolean approximateTime;
-		if (realtimeTime && REALTIME_MANAGER.hasTimeOffset()) {
-			offsetSeconds = REALTIME_MANAGER.currentUtcOffsetSeconds();
-			approximateTime = false;
-		} else {
-			offsetSeconds = approximateUtcOffsetSeconds(longitude);
-			approximateTime = true;
-		}
-		String timeLabel = formatLocalTime(offsetSeconds);
-		String utcOffsetLabel = formatUtcOffset(offsetSeconds);
 
 		source.sendSuccess(() -> Component.literal("Tellus Weather")
 				.withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
@@ -220,15 +236,54 @@ public class Tellus implements ModInitializer {
 		source.sendSuccess(() -> Component.literal("Location: ")
 				.withStyle(ChatFormatting.GRAY)
 				.append(Component.literal(locationText).withStyle(ChatFormatting.AQUA)), false);
-		MutableComponent timeLine = Component.literal("Local time: ")
+		@NonNull String gameTime = Objects.requireNonNull(formatGameTime(level), "gameTime");
+		source.sendSuccess(() -> Component.literal("Game time: ")
+				.withStyle(ChatFormatting.GRAY)
+				.append(Component.literal(gameTime).withStyle(ChatFormatting.YELLOW)), false);
+
+		TellusRealtimeManager.WeatherSnapshot snapshot = REALTIME_MANAGER.lastWeatherSnapshot();
+		ZoneId zone = null;
+		boolean approximateTime = true;
+		if (snapshot != null) {
+			zone = resolveZoneId(snapshot.timeZoneId());
+			approximateTime = zone == null;
+		}
+		if (zone == null && realtimeTime && REALTIME_MANAGER.hasTimeOffset()) {
+			ZoneId managerZone = REALTIME_MANAGER.currentTimeZone();
+			if (managerZone != null) {
+				zone = managerZone;
+				approximateTime = false;
+			}
+		}
+		if (zone == null) {
+			int offsetSeconds = approximateUtcOffsetSeconds(longitude);
+			zone = ZoneOffset.ofTotalSeconds(offsetSeconds);
+			approximateTime = true;
+		}
+		Instant now = REALTIME_MANAGER.currentInstant();
+		int offsetSeconds = zone.getRules().getOffset(now).getTotalSeconds();
+		String timeLabel = formatLocalTime(now, zone);
+		String utcOffsetLabel = formatUtcOffset(offsetSeconds);
+		MutableComponent timeLine = Component.literal("Real time: ")
 				.withStyle(ChatFormatting.GRAY)
 				.append(Component.literal(timeLabel + " " + utcOffsetLabel).withStyle(ChatFormatting.YELLOW));
 		if (approximateTime) {
 			timeLine.append(Component.literal(" (approx)").withStyle(ChatFormatting.DARK_GRAY));
-		} else if (!realtimeTime) {
-			timeLine.append(Component.literal(" (world)").withStyle(ChatFormatting.DARK_GRAY));
 		}
 		source.sendSuccess(() -> timeLine, false);
+
+		MutableComponent tempLine = Component.literal("Temperature: ")
+				.withStyle(ChatFormatting.GRAY);
+		if (snapshot != null) {
+			@NonNull String tempLabel = Objects.requireNonNull(
+					String.format(Locale.ROOT, "%.1f C", snapshot.temperatureC()),
+					"tempLabel"
+			);
+			tempLine.append(Component.literal(tempLabel).withStyle(ChatFormatting.YELLOW));
+		} else {
+			tempLine.append(Component.literal("n/a").withStyle(ChatFormatting.DARK_GRAY));
+		}
+		source.sendSuccess(() -> tempLine, false);
 
 		String weatherLabel = Objects.requireNonNull(weather.label(), "weatherLabel");
 		ChatFormatting weatherColor = Objects.requireNonNull(weather.color(), "weatherColor");
@@ -241,6 +296,28 @@ public class Tellus implements ModInitializer {
 			weatherLine.append(Component.literal(" (real-time pending)").withStyle(ChatFormatting.DARK_GRAY));
 		}
 		source.sendSuccess(() -> weatherLine, false);
+		return 1;
+	}
+
+	private static int setRealtimeTimeOverride(CommandSourceStack source, boolean enabled) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config weather is only available in Tellus worlds."));
+			return 0;
+		}
+		REALTIME_MANAGER.setRealtimeTimeOverride(enabled);
+		source.sendSuccess(() -> Component.literal("Tellus: real-time time set to " + enabled + "."), false);
+		return 1;
+	}
+
+	private static int setRealtimeWeatherOverride(CommandSourceStack source, boolean enabled) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config weather is only available in Tellus worlds."));
+			return 0;
+		}
+		REALTIME_MANAGER.setRealtimeWeatherOverride(enabled);
+		source.sendSuccess(() -> Component.literal("Tellus: real-time weather set to " + enabled + "."), false);
 		return 1;
 	}
 
@@ -265,16 +342,34 @@ public class Tellus implements ModInitializer {
 		return new WeatherDisplay("Clear", ChatFormatting.GREEN);
 	}
 
+	private static ZoneId resolveZoneId(String zoneId) {
+		if (zoneId == null || zoneId.isBlank()) {
+			return null;
+		}
+		try {
+			return ZoneId.of(zoneId);
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
 	private static int approximateUtcOffsetSeconds(double longitude) {
 		double hours = longitude / 15.0;
 		return (int) Math.round(hours * 3600.0);
 	}
 
-	private static String formatLocalTime(int offsetSeconds) {
-		long localSeconds = System.currentTimeMillis() / 1000L + offsetSeconds;
-		long daySeconds = Math.floorMod(localSeconds, 86_400L);
-		int hour = (int) (daySeconds / 3600L);
-		int minute = (int) ((daySeconds % 3600L) / 60L);
+	private static String formatLocalTime(Instant instant, ZoneId zone) {
+		int daySeconds = instant.atZone(zone).toLocalTime().toSecondOfDay();
+		int hour = daySeconds / 3600;
+		int minute = (daySeconds % 3600) / 60;
+		return String.format(Locale.ROOT, "%02d:%02d", hour, minute);
+	}
+
+	private static String formatGameTime(ServerLevel level) {
+		long timeOfDay = Math.floorMod(level.getDayTime(), 24_000L);
+		int totalMinutes = (int) Math.floor(timeOfDay * 60.0 / 1000.0);
+		int hour = (totalMinutes / 60 + 6) % 24;
+		int minute = totalMinutes % 60;
 		return String.format(Locale.ROOT, "%02d:%02d", hour, minute);
 	}
 
@@ -303,6 +398,19 @@ public class Tellus implements ModInitializer {
 		double longitude = clampLongitude(payload.longitude());
 		BlockPos target = earthGenerator.getSurfacePosition(level, latitude, longitude);
 		player.teleportTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5);
+	}
+
+	private static EarthChunkGenerator resolveEarthGenerator(CommandSourceStack source) {
+		MinecraftServer server = source.getServer();
+		ServerLevel level = server.getLevel(Level.OVERWORLD);
+		if (level == null) {
+			return null;
+		}
+		ChunkGenerator generator = level.getChunkSource().getGenerator();
+		if (generator instanceof EarthChunkGenerator earthGenerator) {
+			return earthGenerator;
+		}
+		return null;
 	}
 
 	private static double clampLatitude(double latitude) {

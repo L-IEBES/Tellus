@@ -9,11 +9,13 @@ import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.world.data.koppen.TellusKoppenSource;
 import com.yucareux.tellus.world.data.mask.TellusLandMaskSource;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.navigation.ScreenRectangle;
 import net.minecraft.client.gui.render.TextureSetup;
@@ -97,6 +99,9 @@ public final class TerrainPreview implements AutoCloseable {
 	private final TellusLandMaskSource landMaskSource = new TellusLandMaskSource();
 	private final ExecutorService executor;
 	private final AtomicInteger requestId = new AtomicInteger();
+	private final AtomicReference<PreviewStatus> status = new AtomicReference<>(
+			new PreviewStatus(PreviewStage.COMPLETE, 1.0f)
+	);
 
 	private CompletableFuture<PreviewMesh> pending;
 	private PreviewMesh mesh;
@@ -110,7 +115,8 @@ public final class TerrainPreview implements AutoCloseable {
 		if (this.pending != null) {
 			this.pending.cancel(true);
 		}
-		this.pending = CompletableFuture.supplyAsync(() -> buildMesh(settings), this.executor)
+		updateStatus(id, PreviewStage.DOWNLOADING, 0.0f);
+		this.pending = CompletableFuture.supplyAsync(() -> buildMesh(settings, id), this.executor)
 				.exceptionally(error -> {
 					Tellus.LOGGER.warn("Failed to build terrain preview", error);
 					return null;
@@ -136,6 +142,14 @@ public final class TerrainPreview implements AutoCloseable {
 				Tellus.LOGGER.warn("Preview render update failed", error);
 			}
 		}
+	}
+
+	public boolean isLoading() {
+		return this.pending != null;
+	}
+
+	public @NonNull PreviewStatus getStatus() {
+		return Objects.requireNonNull(this.status.get(), "status");
 	}
 
 	public void render(GuiGraphics graphics, int x, int y, int width, int height, float rotationX, float rotationY, float zoom) {
@@ -167,10 +181,16 @@ public final class TerrainPreview implements AutoCloseable {
 				.rotateY(rotationY);
 	}
 
-	private PreviewMesh buildMesh(EarthGeneratorSettings settings) {
+	private PreviewMesh buildMesh(EarthGeneratorSettings settings, int id) {
 		int size = GRID_SIZE;
 		double[] blockHeights = new double[size * size];
 		double[] elevations = new double[size * size];
+		int coverStride = COVER_SAMPLE_STRIDE;
+		int coverSize = (size + coverStride - 1) / coverStride;
+		int climateStride = CLIMATE_SAMPLE_STRIDE;
+		int climateSize = (size + climateStride - 1) / climateStride;
+		long downloadTotal = (long) size * size + (long) coverSize * coverSize + (long) climateSize * climateSize;
+		long downloadDone = 0;
 
 		double metersPerDegree = EQUATOR_CIRCUMFERENCE / 360.0;
 		double worldScale = settings.worldScale();
@@ -197,25 +217,14 @@ public final class TerrainPreview implements AutoCloseable {
 				);
 				elevations[idx] = elevation;
 				blockHeights[idx] = applyHeightScale(elevation, settings);
+				downloadDone++;
+				if ((downloadDone & 0xFFL) == 0L) {
+					updateStatus(id, PreviewStage.DOWNLOADING, (float) downloadDone / (float) downloadTotal);
+				}
 			}
+			updateStatus(id, PreviewStage.DOWNLOADING, (float) downloadDone / (float) downloadTotal);
 		}
 
-		float[] heights = new float[size * size];
-		float min = Float.POSITIVE_INFINITY;
-		float max = Float.NEGATIVE_INFINITY;
-		for (int i = 0; i < blockHeights.length; i++) {
-			float value = (float) ((blockHeights[i] - settings.heightOffset()) / radius * VERTICAL_SCALE);
-			heights[i] = value;
-			min = Math.min(min, value);
-			max = Math.max(max, value);
-		}
-		float center = (min + max) * 0.5f;
-		for (int i = 0; i < heights.length; i++) {
-			heights[i] -= center;
-		}
-
-		int coverStride = COVER_SAMPLE_STRIDE;
-		int coverSize = (size + coverStride - 1) / coverStride;
 		int[] coverClasses = new int[coverSize * coverSize];
 		for (int z = 0; z < coverSize; z++) {
 			if (Thread.currentThread().isInterrupted()) {
@@ -228,11 +237,14 @@ public final class TerrainPreview implements AutoCloseable {
 				double blockX = centerX - radius + sampleX * step;
 				int idx = x + z * coverSize;
 				coverClasses[idx] = this.landCoverSource.sampleCoverClass(blockX, blockZ, worldScale);
+				downloadDone++;
+				if ((downloadDone & 0xFFL) == 0L) {
+					updateStatus(id, PreviewStage.DOWNLOADING, (float) downloadDone / (float) downloadTotal);
+				}
 			}
+			updateStatus(id, PreviewStage.DOWNLOADING, (float) downloadDone / (float) downloadTotal);
 		}
 
-		int climateStride = CLIMATE_SAMPLE_STRIDE;
-		int climateSize = (size + climateStride - 1) / climateStride;
 		byte[] climateGroups = new byte[climateSize * climateSize];
 		for (int z = 0; z < climateSize; z++) {
 			if (Thread.currentThread().isInterrupted()) {
@@ -246,9 +258,39 @@ public final class TerrainPreview implements AutoCloseable {
 				int idx = x + z * climateSize;
 				String koppen = this.koppenSource.sampleDitheredCode(blockX, blockZ, worldScale);
 				climateGroups[idx] = climateGroup(koppen);
+				downloadDone++;
+				if ((downloadDone & 0xFFL) == 0L) {
+					updateStatus(id, PreviewStage.DOWNLOADING, (float) downloadDone / (float) downloadTotal);
+				}
+			}
+			updateStatus(id, PreviewStage.DOWNLOADING, (float) downloadDone / (float) downloadTotal);
+		}
+
+		float[] heights = new float[size * size];
+		float min = Float.POSITIVE_INFINITY;
+		float max = Float.NEGATIVE_INFINITY;
+		long buildTotal = (long) size * size * 3L;
+		long buildDone = 0;
+		for (int i = 0; i < blockHeights.length; i++) {
+			float value = (float) ((blockHeights[i] - settings.heightOffset()) / radius * VERTICAL_SCALE);
+			heights[i] = value;
+			min = Math.min(min, value);
+			max = Math.max(max, value);
+			if ((i + 1) % size == 0) {
+				buildDone += size;
+				updateStatus(id, PreviewStage.LOADING, (float) buildDone / (float) buildTotal);
+			}
+		}
+		float center = (min + max) * 0.5f;
+		for (int i = 0; i < heights.length; i++) {
+			heights[i] -= center;
+			if ((i + 1) % size == 0) {
+				buildDone += size;
+				updateStatus(id, PreviewStage.LOADING, (float) buildDone / (float) buildTotal);
 			}
 		}
 
+		updateStatus(id, PreviewStage.LOADING, (float) buildDone / (float) buildTotal);
 		int seaLevel = settings.resolveSeaLevel();
 		int[] colors = new int[size * size];
 		for (int z = 0; z < size; z++) {
@@ -275,6 +317,8 @@ public final class TerrainPreview implements AutoCloseable {
 						seaLevel
 				);
 			}
+			buildDone += size;
+			updateStatus(id, PreviewStage.LOADING, (float) buildDone / (float) buildTotal);
 		}
 
 		float[] xCoords = new float[size];
@@ -282,6 +326,7 @@ public final class TerrainPreview implements AutoCloseable {
 			xCoords[i] = (float) (-1.0 + (2.0 * i) / (size - 1));
 		}
 
+		updateStatus(id, PreviewStage.COMPLETE, 1.0f);
 		return new PreviewMesh(size, GRANULARITY, heights, colors, xCoords);
 	}
 
@@ -493,6 +538,25 @@ public final class TerrainPreview implements AutoCloseable {
 			this.pending.cancel(true);
 		}
 		this.executor.shutdownNow();
+	}
+
+	private void updateStatus(int id, @NonNull PreviewStage stage, float progress) {
+		if (id != this.requestId.get()) {
+			return;
+		}
+		this.status.set(new PreviewStatus(stage, Mth.clamp(progress, 0.0f, 1.0f)));
+	}
+
+	public enum PreviewStage {
+		DOWNLOADING,
+		LOADING,
+		COMPLETE
+	}
+
+	public record PreviewStatus(@NonNull PreviewStage stage, float progress) {
+		public PreviewStatus {
+			Objects.requireNonNull(stage, "stage");
+		}
 	}
 
 	private static final class PreviewMesh {

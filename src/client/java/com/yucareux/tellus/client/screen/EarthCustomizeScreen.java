@@ -1,12 +1,20 @@
 package com.yucareux.tellus.client.screen;
 
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.client.preview.TerrainPreview;
 import com.yucareux.tellus.client.preview.TerrainPreviewWidget;
+import com.yucareux.tellus.client.preview.TerrainPreviewWidget.ViewState;
 import com.yucareux.tellus.client.widget.CustomizationList;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import com.mojang.serialization.Lifecycle;
 import com.mojang.blaze3d.platform.InputConstants;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -16,7 +24,14 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.DoubleFunction;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import net.minecraft.ChatFormatting;
+import net.minecraft.util.Util;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
@@ -24,9 +39,11 @@ import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.Tooltip;
+import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.worldselection.CreateWorldScreen;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationContext;
+import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
@@ -74,6 +91,11 @@ public class EarthCustomizeScreen extends Screen {
 	private static final int SIDE_PADDING = 10;
 	private static final int PREVIEW_PADDING = 20;
 	private static final long PREVIEW_DEBOUNCE_MS = 350L;
+	private static final int INFO_TITLE_COLOR = 0xFFF6C874;
+	private static final int INFO_TEXT_COLOR = 0xFFE5E5E5;
+	private static final int INFO_SUBTLE_COLOR = 0xFFB9B9B9;
+	private static final int INFO_LINK_COLOR = 0xFF55FFFF;
+	private static final int INFO_LINK_HOVER_COLOR = 0xFFAAFFFF;
 	private static final double AUTO_MAX_ALTITUDE = -1.0;
 	private static final double AUTO_MIN_ALTITUDE = EarthGeneratorSettings.MIN_WORLD_Y - 16.0;
 	private static final double ALTITUDE_AUTO_EPSILON = 0.5;
@@ -88,7 +110,9 @@ public class EarthCustomizeScreen extends Screen {
 	private final List<CategoryDefinition> categories;
 
 	private CustomizationList list;
+	private final @NonNull TerrainPreview preview = new TerrainPreview();
 	private TerrainPreviewWidget previewWidget;
+	private @Nullable ViewState pendingPreviewViewState;
 	private long previewDirtyAt = -1L;
 	private double spawnLatitude = EarthGeneratorSettings.DEFAULT_SPAWN_LATITUDE;
 	private double spawnLongitude = EarthGeneratorSettings.DEFAULT_SPAWN_LONGITUDE;
@@ -112,7 +136,12 @@ public class EarthCustomizeScreen extends Screen {
 		this.addRenderableWidget(this.list);
 
 		int previewX = this.width - previewWidth - SIDE_PADDING;
-		this.previewWidget = new TerrainPreviewWidget(previewX, listTop, previewWidth, previewHeight);
+		this.previewWidget = new TerrainPreviewWidget(previewX, listTop, previewWidth, previewHeight, this.preview);
+		this.previewWidget.setFullscreenAction(this::openPreviewFullScreen);
+		if (this.pendingPreviewViewState != null) {
+			this.previewWidget.setViewState(this.pendingPreviewViewState);
+			this.pendingPreviewViewState = null;
+		}
 		this.addRenderableWidget(this.previewWidget);
 
 		this.showCategories();
@@ -153,6 +182,21 @@ public class EarthCustomizeScreen extends Screen {
 		return this.spawnLongitude;
 	}
 
+	private void openPreviewFullScreen() {
+		if (this.minecraft != null && this.previewWidget != null) {
+			@NonNull ViewState viewState = Objects.requireNonNull(this.previewWidget.getViewState(), "viewState");
+			this.minecraft.setScreen(new TerrainPreviewScreen(this, this.preview, viewState));
+		}
+	}
+
+	public void applyPreviewViewState(@NonNull ViewState state) {
+		this.pendingPreviewViewState = state;
+		if (this.previewWidget != null && this.minecraft != null && this.minecraft.screen == this) {
+			this.previewWidget.setViewState(state);
+			this.pendingPreviewViewState = null;
+		}
+	}
+
 	@Override
 	public void onClose() {
 		if (this.minecraft != null) {
@@ -167,6 +211,7 @@ public class EarthCustomizeScreen extends Screen {
 					"updatedWorldContext"
 			);
 			this.parent.getUiState().setSettings(updated);
+			this.preview.close();
 			this.minecraft.setScreen(this.parent);
 		}
 	}
@@ -375,32 +420,76 @@ public class EarthCustomizeScreen extends Screen {
 				"shoreline_blend_cliff_limit",
 				EarthGeneratorSettings.DEFAULT.shorelineBlendCliffLimit()
 		);
-		boolean caveCarvers = false;
-		boolean largeCaves = false;
-		boolean canyonCarvers = false;
-		boolean aquifers = false;
-		boolean dripstone = false;
-		boolean deepDark = false;
-		boolean oreDistribution = this.findToggleValue("ore_distribution", false);
-		boolean geodes = false;
-		boolean lavaPools = this.findToggleValue("lava_pools", false);
-		boolean addStrongholds = false;
-		boolean addVillages = this.findToggleValue("add_villages", true);
-		boolean addMineshafts = false;
-		boolean addOceanMonuments = this.findToggleValue("add_ocean_monuments", true);
-		boolean addWoodlandMansions = this.findToggleValue("add_woodland_mansions", true);
-		boolean addDesertTemples = this.findToggleValue("add_desert_temples", true);
-		boolean addJungleTemples = this.findToggleValue("add_jungle_temples", true);
-		boolean addPillagerOutposts = this.findToggleValue("add_pillager_outposts", true);
-		boolean addRuinedPortals = this.findToggleValue("add_ruined_portals", true);
-		boolean addShipwrecks = this.findToggleValue("add_shipwrecks", true);
-		boolean addOceanRuins = this.findToggleValue("add_ocean_ruins", true);
-		boolean addBuriedTreasure = this.findToggleValue("add_buried_treasure", true);
-		boolean addIgloos = this.findToggleValue("add_igloos", true);
-		boolean addWitchHuts = this.findToggleValue("add_witch_huts", true);
-		boolean addAncientCities = false;
-		boolean addTrialChambers = false;
-		boolean addTrailRuins = this.findToggleValue("add_trail_ruins", true);
+		boolean caveGeneration = this.findToggleValue(
+				"cave_generation",
+				EarthGeneratorSettings.DEFAULT.caveGeneration()
+		);
+		boolean oreDistribution = this.findToggleValue(
+				"ore_distribution",
+				EarthGeneratorSettings.DEFAULT.oreDistribution()
+		);
+		boolean lavaPools = this.findToggleValue(
+				"lava_pools",
+				EarthGeneratorSettings.DEFAULT.lavaPools()
+		);
+		boolean deepDark = this.findToggleValue("deep_dark", EarthGeneratorSettings.DEFAULT.deepDark());
+		boolean geodes = this.findToggleValue("geodes", EarthGeneratorSettings.DEFAULT.geodes());
+		boolean addStrongholds = this.findToggleValue(
+				"add_strongholds",
+				EarthGeneratorSettings.DEFAULT.addStrongholds()
+		);
+		boolean addVillages = this.findToggleValue("add_villages", EarthGeneratorSettings.DEFAULT.addVillages());
+		boolean addMineshafts = this.findToggleValue(
+				"add_mineshafts",
+				EarthGeneratorSettings.DEFAULT.addMineshafts()
+		);
+		boolean addOceanMonuments = this.findToggleValue(
+				"add_ocean_monuments",
+				EarthGeneratorSettings.DEFAULT.addOceanMonuments()
+		);
+		boolean addWoodlandMansions = this.findToggleValue(
+				"add_woodland_mansions",
+				EarthGeneratorSettings.DEFAULT.addWoodlandMansions()
+		);
+		boolean addDesertTemples = this.findToggleValue(
+				"add_desert_temples",
+				EarthGeneratorSettings.DEFAULT.addDesertTemples()
+		);
+		boolean addJungleTemples = this.findToggleValue(
+				"add_jungle_temples",
+				EarthGeneratorSettings.DEFAULT.addJungleTemples()
+		);
+		boolean addPillagerOutposts = this.findToggleValue(
+				"add_pillager_outposts",
+				EarthGeneratorSettings.DEFAULT.addPillagerOutposts()
+		);
+		boolean addRuinedPortals = this.findToggleValue(
+				"add_ruined_portals",
+				EarthGeneratorSettings.DEFAULT.addRuinedPortals()
+		);
+		boolean addShipwrecks = this.findToggleValue(
+				"add_shipwrecks",
+				EarthGeneratorSettings.DEFAULT.addShipwrecks()
+		);
+		boolean addOceanRuins = this.findToggleValue(
+				"add_ocean_ruins",
+				EarthGeneratorSettings.DEFAULT.addOceanRuins()
+		);
+		boolean addBuriedTreasure = this.findToggleValue(
+				"add_buried_treasure",
+				EarthGeneratorSettings.DEFAULT.addBuriedTreasure()
+		);
+		boolean addIgloos = this.findToggleValue("add_igloos", EarthGeneratorSettings.DEFAULT.addIgloos());
+		boolean addWitchHuts = this.findToggleValue("add_witch_huts", EarthGeneratorSettings.DEFAULT.addWitchHuts());
+		boolean addAncientCities = this.findToggleValue(
+				"add_ancient_cities",
+				EarthGeneratorSettings.DEFAULT.addAncientCities()
+		);
+		boolean addTrialChambers = this.findToggleValue(
+				"add_trial_chambers",
+				EarthGeneratorSettings.DEFAULT.addTrialChambers()
+		);
+		boolean addTrailRuins = this.findToggleValue("add_trail_ruins", EarthGeneratorSettings.DEFAULT.addTrailRuins());
 		boolean distantHorizonsWaterResolver = this.findToggleValue(
 				"distant_horizons_water_resolver",
 				EarthGeneratorSettings.DEFAULT.distantHorizonsWaterResolver()
@@ -425,14 +514,8 @@ public class EarthCustomizeScreen extends Screen {
 				riverLakeShorelineBlend,
 				oceanShorelineBlend,
 				shorelineBlendCliffLimit,
-				caveCarvers,
-				largeCaves,
-				canyonCarvers,
-				aquifers,
-				dripstone,
-				deepDark,
+				caveGeneration,
 				oreDistribution,
-				geodes,
 				lavaPools,
 				addStrongholds,
 				addVillages,
@@ -451,6 +534,8 @@ public class EarthCustomizeScreen extends Screen {
 				addAncientCities,
 				addTrialChambers,
 				addTrailRuins,
+				deepDark,
+				geodes,
 				distantHorizonsWaterResolver,
 				realtimeTime,
 				realtimeWeather,
@@ -505,7 +590,7 @@ public class EarthCustomizeScreen extends Screen {
 		List<CategoryDefinition> categories = new ArrayList<>();
 
 		categories.add(new CategoryDefinition("world", List.of(
-				slider("world_scale", 35.0, 1.0, 40000.0, 5.0)
+				slider("world_scale", 35.0, 1.0, 500.0, 5.0)
 						.withDisplay(EarthCustomizeScreen::formatWorldScale)
 						.withScale(SliderScale.power(3.0)),
 				slider("terrestrial_height_scale", 1.0, 0.0, 50.0, 0.5)
@@ -543,35 +628,37 @@ public class EarthCustomizeScreen extends Screen {
 		)));
 
 		categories.add(new CategoryDefinition("geological", List.of(
-				toggle("cave_carvers", false).locked(true),
-				toggle("large_caves", false).locked(true),
-				toggle("canyon_carvers", false).locked(true),
-				toggle("aquifers", false).locked(true),
-				toggle("dripstone", false).locked(true),
-				toggle("deep_dark", false).locked(true),
-				toggle("ore_distribution", false),
-				toggle("geodes", false).locked(true),
-				toggle("lava_pools", false)
+				toggle("cave_generation", EarthGeneratorSettings.DEFAULT.caveGeneration()),
+				toggle("ore_distribution", EarthGeneratorSettings.DEFAULT.oreDistribution()),
+				toggle("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools())
 		)));
 
 		categories.add(new CategoryDefinition("structure", List.of(
-				toggle("add_strongholds", false).locked(true),
-				toggle("add_villages", true),
-				toggle("add_mineshafts", false).locked(true),
-				toggle("add_ocean_monuments", true),
-				toggle("add_woodland_mansions", true),
-				toggle("add_desert_temples", true),
-				toggle("add_jungle_temples", true),
-				toggle("add_pillager_outposts", true),
-				toggle("add_ruined_portals", true),
-				toggle("add_shipwrecks", true),
-				toggle("add_ocean_ruins", true),
-				toggle("add_buried_treasure", true),
-				toggle("add_igloos", true),
-				toggle("add_witch_huts", true),
-				toggle("add_ancient_cities", false).locked(true),
-				toggle("add_trial_chambers", false).locked(true),
-				toggle("add_trail_ruins", true)
+				toggle("add_strongholds", EarthGeneratorSettings.DEFAULT.addStrongholds()),
+				toggle("add_villages", EarthGeneratorSettings.DEFAULT.addVillages()),
+				toggle("add_mineshafts", EarthGeneratorSettings.DEFAULT.addMineshafts()),
+				toggle("add_ocean_monuments", EarthGeneratorSettings.DEFAULT.addOceanMonuments()),
+				toggle("add_woodland_mansions", EarthGeneratorSettings.DEFAULT.addWoodlandMansions()),
+				toggle("add_desert_temples", EarthGeneratorSettings.DEFAULT.addDesertTemples()),
+				toggle("add_jungle_temples", EarthGeneratorSettings.DEFAULT.addJungleTemples()),
+				toggle("add_pillager_outposts", EarthGeneratorSettings.DEFAULT.addPillagerOutposts()),
+				toggle("add_ruined_portals", EarthGeneratorSettings.DEFAULT.addRuinedPortals()),
+				toggle("add_shipwrecks", EarthGeneratorSettings.DEFAULT.addShipwrecks()),
+				toggle("add_ocean_ruins", EarthGeneratorSettings.DEFAULT.addOceanRuins()),
+				toggle("add_buried_treasure", EarthGeneratorSettings.DEFAULT.addBuriedTreasure()),
+				toggle("add_igloos", EarthGeneratorSettings.DEFAULT.addIgloos()),
+				toggle("add_witch_huts", EarthGeneratorSettings.DEFAULT.addWitchHuts()),
+				toggle("add_ancient_cities", EarthGeneratorSettings.DEFAULT.addAncientCities()),
+				toggle("add_trial_chambers", EarthGeneratorSettings.DEFAULT.addTrialChambers()),
+				toggle("add_trail_ruins", EarthGeneratorSettings.DEFAULT.addTrailRuins()),
+				toggle("deep_dark", EarthGeneratorSettings.DEFAULT.deepDark()),
+				toggle("geodes", EarthGeneratorSettings.DEFAULT.geodes())
+		)));
+
+		categories.add(new CategoryDefinition("realtime", List.of(
+				toggle("realtime_time", EarthGeneratorSettings.DEFAULT.realtimeTime()),
+				toggle("realtime_weather", EarthGeneratorSettings.DEFAULT.realtimeWeather()),
+				toggle("historical_snow", EarthGeneratorSettings.DEFAULT.historicalSnow())
 		)));
 
 		categories.add(new CategoryDefinition("compatibility", List.of(
@@ -580,11 +667,18 @@ public class EarthCustomizeScreen extends Screen {
 				comingSoonButton()
 		)));
 
-		categories.add(new CategoryDefinition("realtime", List.of(
-				toggle("realtime_time", EarthGeneratorSettings.DEFAULT.realtimeTime()),
-				toggle("realtime_weather", EarthGeneratorSettings.DEFAULT.realtimeWeather()),
-				toggle("historical_snow", EarthGeneratorSettings.DEFAULT.historicalSnow())
+		categories.add(new CategoryDefinition("cache", List.of(
+				cacheEntry(CacheMetric.OSM, true),
+				cacheEntry(CacheMetric.ESA, true),
+				cacheEntry(CacheMetric.TERRAIN, true),
+				cacheEntry(CacheMetric.TOTAL, false),
+				cacheActionButton(
+						Component.translatable("tellus.cache.delete_all"),
+						CacheManager::deleteAll
+				)
 		)));
+
+		categories.add(new CategoryDefinition("data_sources", dataSourcesEntries()));
 
 		return categories;
 	}
@@ -623,11 +717,105 @@ public class EarthCustomizeScreen extends Screen {
 		return new ButtonDefinition(label, tooltip, false);
 	}
 
+	private static CacheEntryDefinition cacheEntry(CacheMetric metric, boolean allowDelete) {
+		return new CacheEntryDefinition(metric, allowDelete);
+	}
+
+	private static CacheActionDefinition cacheActionButton(@NonNull Component label, @NonNull Runnable action) {
+		return new CacheActionDefinition(label, action);
+	}
+
+	private static List<SettingDefinition> dataSourcesEntries() {
+		List<SettingDefinition> entries = new ArrayList<>();
+
+		entries.add(infoHeader("ESA WorldCover 2021 (land cover)"));
+		entries.add(infoLine("ESA WorldCover 2021 (10 m land cover, v200)"));
+		entries.add(infoLine("© ESA WorldCover project / Contains modified Copernicus Sentinel data (2021)"));
+		entries.add(infoLine("processed by ESA WorldCover consortium."));
+		entries.add(infoSubtle("License: CC BY 4.0"));
+		entries.add(infoLink("https://creativecommons.org/licenses/by/4.0/"));
+		entries.add(infoLink("https://doi.org/10.5281/zenodo.7254221"));
+		entries.add(infoLine("In-game processing: reprojected to the world grid, resampled to blocks,"));
+		entries.add(infoLine("and cached as tiles for fast lookup."));
+		entries.add(infoSpacer());
+
+		entries.add(infoHeader("Köppen–Geiger climate classification (1 km, Beck et al. 2018)"));
+		entries.add(infoLine("Source: Beck, H.E., Zimmermann, N.E., McVicar, T.R., et al. (2018)."));
+		entries.add(infoLine("Present and future Köppen–Geiger climate classification maps at 1-km resolution"));
+		entries.add(infoLine("(Scientific Data)."));
+		entries.add(infoSubtle("License: CC BY 4.0"));
+		entries.add(infoLink("https://creativecommons.org/licenses/by/4.0/"));
+		entries.add(infoSubtle("Publication DOI:"));
+		entries.add(infoLink("https://doi.org/10.1038/sdata.2018.214"));
+		entries.add(infoLine("In-game processing: reprojected and resampled to match the world grid."));
+		entries.add(infoLine("Cached for fast lookup."));
+		entries.add(infoSpacer());
+
+		entries.add(infoHeader("Terrain Tiles (global DEM tiles)"));
+		entries.add(infoLine("Terrain Tiles (AWS Open Data Registry / Mapzen Jörð)"));
+		entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
+		entries.add(infoLink("https://registry.opendata.aws/terrain-tiles"));
+		entries.add(infoLine("Source attributions for Terrain Tiles:"));
+		entries.add(infoSubtle("ArcticDEM terrain data: DEM(s) were created from DigitalGlobe, Inc. imagery"));
+		entries.add(infoSubtle("and funded under National Science Foundation awards 1043681, 1559691, and 1542736;"));
+		entries.add(infoSubtle("Australia terrain data © Commonwealth of Australia (Geoscience Australia) 2017;"));
+		entries.add(infoSubtle("Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich;"));
+		entries.add(infoSubtle("Canada terrain data contains information licensed under the Open Government Licence – Canada;"));
+		entries.add(infoSubtle("Europe terrain data produced using Copernicus data and information funded by the"));
+		entries.add(infoSubtle("European Union – EU-DEM layers;"));
+		entries.add(infoSubtle("Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration;"));
+		entries.add(infoSubtle("Mexico terrain data source: INEGI, Continental relief, 2016;"));
+		entries.add(infoSubtle("New Zealand terrain data Copyright 2011 Crown copyright (c) Land Information"));
+		entries.add(infoSubtle("New Zealand and the New Zealand Government (All rights reserved);"));
+		entries.add(infoSubtle("Norway terrain data © Kartverket;"));
+		entries.add(infoSubtle("United Kingdom terrain data © Environment Agency copyright and/or database right 2015."));
+		entries.add(infoSubtle("All rights reserved;"));
+		entries.add(infoSubtle("United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data"));
+		entries.add(infoSubtle("courtesy of the U.S. Geological Survey."));
+		entries.add(infoSpacer());
+
+		entries.add(infoHeader("Open-Meteo (weather)"));
+		entries.add(infoLine("Weather data provided by Open-Meteo.com."));
+		entries.add(infoLink("https://open-meteo.com/"));
+		entries.add(infoSubtle("License: CC BY 4.0"));
+		entries.add(infoLink("https://creativecommons.org/licenses/by/4.0/"));
+		entries.add(infoLine("Credit: \"Weather data by Open-Meteo.com\"."));
+		entries.add(infoLink("https://doi.org/10.5281/ZENODO.7970649"));
+
+		return entries;
+	}
+
+	private static TextLineDefinition infoHeader(@NonNull String text) {
+		return new TextLineDefinition(Component.literal(text), INFO_TITLE_COLOR, null);
+	}
+
+	private static TextLineDefinition infoLine(@NonNull String text) {
+		return new TextLineDefinition(Component.literal(text), INFO_TEXT_COLOR, null);
+	}
+
+	private static TextLineDefinition infoSubtle(@NonNull String text) {
+		return new TextLineDefinition(Component.literal(text), INFO_SUBTLE_COLOR, null);
+	}
+
+	private static TextLineDefinition infoLink(@NonNull String url) {
+		return new TextLineDefinition(Component.literal(url), INFO_LINK_COLOR, url);
+	}
+
+	private static SpacerDefinition infoSpacer() {
+		return new SpacerDefinition();
+	}
+
 	private static String formatWorldScale(double value) {
 		if (value < 1000.0) {
 			return String.format(Locale.ROOT, "1:%.0fm", value);
 		}
 		return String.format(Locale.ROOT, "1:%.1fkm", value / 1000.0);
+	}
+
+	private static String formatLocalDate() {
+		DateTimeFormatter formatter = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+				.withLocale(Locale.getDefault());
+		return formatter.format(LocalDate.now());
 	}
 
 	private static String formatMultiplier(double value) {
@@ -669,6 +857,25 @@ public class EarthCustomizeScreen extends Screen {
 			return "Automatic";
 		}
 		return String.format(Locale.ROOT, "%.0f blocks", value);
+	}
+
+	private static @NonNull String formatBytes(long bytes) {
+		if (bytes <= 0) {
+			return "0 B";
+		}
+		double value = bytes;
+		String[] units = {"B", "KB", "MB", "GB", "TB"};
+		int unit = 0;
+		while (value >= 1024.0 && unit < units.length - 1) {
+			value /= 1024.0;
+			unit++;
+		}
+		if (unit == 0) {
+			@NonNull String formatted = Objects.requireNonNull(String.format(Locale.ROOT, "%d B", bytes), "formattedBytes");
+			return formatted;
+		}
+		@NonNull String formatted = Objects.requireNonNull(String.format(Locale.ROOT, "%.1f %s", value, units[unit]), "formattedBytes");
+		return formatted;
 	}
 
 	private static @NonNull Component settingName(String key) {
@@ -828,6 +1035,7 @@ public class EarthCustomizeScreen extends Screen {
 	}
 
 	private void showCategories() {
+		setPreviewVisible(true);
 		this.list.clear();
 		for (CategoryDefinition category : this.categories) {
 			Component label = Objects.requireNonNull(category.getLabel(), "categoryLabel");
@@ -847,10 +1055,59 @@ public class EarthCustomizeScreen extends Screen {
 				.build();
 		this.list.addWidget(back);
 
+		boolean hidePreview = isPreviewHiddenCategory(category.getId());
+		setPreviewVisible(!hidePreview);
+
+		if ("cache".equals(category.getId())) {
+			CacheManager.requestRefresh();
+		}
+
 		for (SettingDefinition setting : category.getSettings()) {
 			this.list.addWidget(setting.createWidget(this::onSettingsChanged));
 		}
 		this.list.setScrollAmount(0.0);
+	}
+
+	private static boolean isPreviewHiddenCategory(String id) {
+		return "cache".equals(id) || "data_sources".equals(id);
+	}
+
+	private void setPreviewVisible(boolean visible) {
+		updateLayout(visible);
+	}
+
+	private void updateLayout(boolean previewVisible) {
+		if (this.list == null) {
+			return;
+		}
+		int listTop = LIST_TOP;
+		int listHeight = Math.max(0, this.height - LIST_BOTTOM_PADDING - listTop);
+		int listWidth = previewVisible
+				? Math.max(140, this.width / 2 - PREVIEW_PADDING)
+				: Math.max(140, this.width - SIDE_PADDING * 2);
+
+		this.list.setX(SIDE_PADDING);
+		this.list.setY(listTop);
+		this.list.setWidth(listWidth);
+		this.list.setHeight(listHeight);
+
+		if (this.previewWidget == null) {
+			return;
+		}
+		this.previewWidget.visible = previewVisible;
+		this.previewWidget.active = previewVisible;
+
+		if (!previewVisible) {
+			return;
+		}
+
+		int previewWidth = Math.max(140, this.width - listWidth - PREVIEW_PADDING * 2);
+		int previewHeight = Math.max(80, this.height - 80);
+		int previewX = this.width - previewWidth - SIDE_PADDING;
+		this.previewWidget.setX(previewX);
+		this.previewWidget.setY(listTop);
+		this.previewWidget.setWidth(previewWidth);
+		this.previewWidget.setHeight(previewHeight);
 	}
 
 	private static final class CategoryDefinition {
@@ -860,6 +1117,10 @@ public class EarthCustomizeScreen extends Screen {
 		private CategoryDefinition(String id, List<SettingDefinition> settings) {
 			this.id = id;
 			this.settings = settings;
+		}
+
+		private String getId() {
+			return this.id;
 		}
 
 		private @NonNull Component getLabel() {
@@ -935,6 +1196,393 @@ public class EarthCustomizeScreen extends Screen {
 				button.setTooltip(Tooltip.create(this.tooltip));
 			}
 			return button;
+		}
+	}
+
+	private static final class CacheActionDefinition implements SettingDefinition {
+		private final @NonNull Component label;
+		private final @NonNull Runnable action;
+
+		private CacheActionDefinition(@NonNull Component label, @NonNull Runnable action) {
+			this.label = Objects.requireNonNull(label, "label");
+			this.action = Objects.requireNonNull(action, "action");
+		}
+
+		@Override
+		public AbstractWidget createWidget(Runnable onChange) {
+			return new CacheActionWidget(this.label, this.action);
+		}
+	}
+
+	private static final class CacheEntryDefinition implements SettingDefinition {
+		private final CacheMetric metric;
+		private final boolean allowDelete;
+
+		private CacheEntryDefinition(CacheMetric metric, boolean allowDelete) {
+			this.metric = Objects.requireNonNull(metric, "metric");
+			this.allowDelete = allowDelete;
+		}
+
+		@Override
+		public AbstractWidget createWidget(Runnable onChange) {
+			return new CacheEntryWidget(this.metric, this.allowDelete);
+		}
+	}
+
+	private static final class TextLineDefinition implements SettingDefinition {
+		private final @NonNull Component text;
+		private final int color;
+		private final @Nullable String url;
+
+		private TextLineDefinition(Component text, int color, @Nullable String url) {
+			this.text = Objects.requireNonNull(text, "text");
+			this.color = color;
+			this.url = url;
+		}
+
+		@Override
+		public AbstractWidget createWidget(Runnable onChange) {
+			return new TextLineWidget(this.text, this.color, this.url);
+		}
+	}
+
+	private static final class SpacerDefinition implements SettingDefinition {
+		@Override
+		public AbstractWidget createWidget(Runnable onChange) {
+			return new SpacerWidget();
+		}
+	}
+
+	private static final class CacheEntryWidget extends AbstractWidget {
+		private static final int PADDING = 4;
+		private static final int MIN_BUTTON_WIDTH = 96;
+		private static final @NonNull Component DELETE_LABEL =
+				Objects.requireNonNull(Component.translatable("tellus.cache.delete"), "deleteLabel");
+
+		private final CacheMetric metric;
+		private final Button deleteButton;
+		private final boolean allowDelete;
+
+		private CacheEntryWidget(CacheMetric metric, boolean allowDelete) {
+			super(0, 0, 0, ENTRY_HEIGHT, Component.empty());
+			this.metric = Objects.requireNonNull(metric, "metric");
+			this.allowDelete = allowDelete;
+			this.deleteButton = Button.builder(DELETE_LABEL, btn -> CacheManager.delete(metric))
+					.bounds(0, 0, 0, ENTRY_HEIGHT)
+					.build();
+		}
+
+		@Override
+		protected void renderWidget(@NonNull GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+			var font = Minecraft.getInstance().font;
+			CacheSnapshot snapshot = CacheManager.snapshot();
+			boolean ready = snapshot.ready();
+			long bytes = snapshot.bytesFor(this.metric);
+			@NonNull String sizeText = ready ? formatBytes(bytes) : "...";
+
+			int buttonWidth = Math.max(MIN_BUTTON_WIDTH, font.width(DELETE_LABEL) + 12);
+			int buttonX = this.getX() + this.width - buttonWidth;
+			int buttonY = this.getY();
+			int sizeWidth = font.width(sizeText);
+			int sizeX = buttonX - PADDING - sizeWidth;
+			int labelX = this.getX() + PADDING;
+			int textY = this.getY() + (this.height - font.lineHeight) / 2;
+
+			Component label = this.metric.label();
+			graphics.drawString(font, label, labelX, textY, 0xFFFFFFFF, false);
+			graphics.drawString(font, sizeText, sizeX, textY, 0xFFA0A0A0, false);
+
+			if (this.allowDelete) {
+				this.deleteButton.setX(buttonX);
+				this.deleteButton.setY(buttonY);
+				this.deleteButton.setWidth(buttonWidth);
+				this.deleteButton.setHeight(this.height);
+				this.deleteButton.active = ready && bytes > 0;
+				this.deleteButton.render(graphics, mouseX, mouseY, delta);
+			}
+		}
+
+		@Override
+		public void onClick(@NonNull MouseButtonEvent event, boolean doubleClick) {
+			if (this.allowDelete) {
+				this.deleteButton.mouseClicked(event, doubleClick);
+			}
+		}
+
+		@Override
+		protected void onDrag(@NonNull MouseButtonEvent event, double deltaX, double deltaY) {
+			if (this.allowDelete) {
+				this.deleteButton.mouseDragged(event, deltaX, deltaY);
+			}
+		}
+
+		@Override
+		public void onRelease(@NonNull MouseButtonEvent event) {
+			if (this.allowDelete) {
+				this.deleteButton.mouseReleased(event);
+			}
+		}
+
+		@Override
+		protected void updateWidgetNarration(@NonNull NarrationElementOutput narration) {
+		}
+	}
+
+	private static final class TextLineWidget extends AbstractWidget {
+		private final @NonNull Component text;
+		private final int color;
+		private final @Nullable String url;
+
+		private TextLineWidget(Component text, int color, @Nullable String url) {
+			super(0, 0, 0, ENTRY_HEIGHT, Component.empty());
+			this.text = Objects.requireNonNull(text, "text");
+			this.color = color;
+			this.url = url;
+		}
+
+		@Override
+		protected void renderWidget(@NonNull GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+			if (this.text.getString().isEmpty()) {
+				return;
+			}
+			var font = Minecraft.getInstance().font;
+			int textWidth = font.width(this.text);
+			int textX = this.getX() + Math.max(0, (this.width - textWidth) / 2);
+			int textY = this.getY() + (this.height - font.lineHeight) / 2;
+			boolean hover = this.url != null && this.isMouseOver(mouseX, mouseY);
+			int drawColor = hover ? INFO_LINK_HOVER_COLOR : this.color;
+			graphics.drawString(font, this.text, textX, textY, drawColor, true);
+			if (this.url != null) {
+				int underlineY = textY + font.lineHeight;
+				graphics.fill(textX, underlineY, textX + textWidth, underlineY + 1, drawColor);
+			}
+		}
+
+		@Override
+		public boolean mouseClicked(@NonNull MouseButtonEvent event, boolean isPrimary) {
+			String url = this.url;
+			if (url != null && event.button() == 0 && this.isMouseOver(event.x(), event.y())) {
+				Util.getPlatform().openUri(url);
+				return true;
+			}
+			return false;
+		}
+
+		@Override
+		protected void updateWidgetNarration(@NonNull NarrationElementOutput narration) {
+		}
+	}
+
+	private static final class SpacerWidget extends AbstractWidget {
+		private SpacerWidget() {
+			super(0, 0, 0, ENTRY_HEIGHT, Component.empty());
+		}
+
+		@Override
+		protected void renderWidget(@NonNull GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+		}
+
+		@Override
+		protected void updateWidgetNarration(@NonNull NarrationElementOutput narration) {
+		}
+	}
+
+	private static final class CacheActionWidget extends AbstractWidget {
+		private final Button button;
+
+		private CacheActionWidget(@NonNull Component label, @NonNull Runnable action) {
+			super(0, 0, 0, ENTRY_HEIGHT, Component.empty());
+			Component safeLabel = Objects.requireNonNull(label, "label");
+			Runnable safeAction = Objects.requireNonNull(action, "action");
+			this.button = Button.builder(safeLabel, btn -> safeAction.run())
+					.bounds(0, 0, 0, ENTRY_HEIGHT)
+					.build();
+		}
+
+		@Override
+		protected void renderWidget(@NonNull GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+			CacheSnapshot snapshot = CacheManager.snapshot();
+			this.button.active = snapshot.ready() && snapshot.totalBytes() > 0;
+			this.button.setX(this.getX());
+			this.button.setY(this.getY());
+			this.button.setWidth(this.width);
+			this.button.setHeight(this.height);
+			this.button.render(graphics, mouseX, mouseY, delta);
+		}
+
+		@Override
+		public void onClick(@NonNull MouseButtonEvent event, boolean doubleClick) {
+			this.button.mouseClicked(event, doubleClick);
+		}
+
+		@Override
+		protected void onDrag(@NonNull MouseButtonEvent event, double deltaX, double deltaY) {
+			this.button.mouseDragged(event, deltaX, deltaY);
+		}
+
+		@Override
+		public void onRelease(@NonNull MouseButtonEvent event) {
+			this.button.mouseReleased(event);
+		}
+
+		@Override
+		protected void updateWidgetNarration(@NonNull NarrationElementOutput narration) {
+		}
+	}
+
+	private enum CacheMetric {
+		OSM("tellus.cache.section.osm", "tellus/cache/map"),
+		ESA("tellus.cache.section.esa", "tellus/cache/worldcover2021"),
+		TERRAIN("tellus.cache.section.terrain", "tellus/cache/elevation-tellus"),
+		TOTAL("tellus.cache.section.total", null);
+
+		private final @NonNull String labelKey;
+		private final @Nullable String relativePath;
+
+		CacheMetric(@NonNull String labelKey, @Nullable String relativePath) {
+			this.labelKey = Objects.requireNonNull(labelKey, "labelKey");
+			this.relativePath = relativePath;
+		}
+
+		private @NonNull Component label() {
+			return Objects.requireNonNull(Component.translatable(this.labelKey), "cacheLabel");
+		}
+
+		private @Nullable Path resolvePath() {
+			if (this.relativePath == null) {
+				return null;
+			}
+			return Minecraft.getInstance().gameDirectory.toPath().resolve(this.relativePath);
+		}
+	}
+
+	private record CacheSnapshot(boolean ready, long osmBytes, long esaBytes, long terrainBytes) {
+		private static CacheSnapshot empty() {
+			return new CacheSnapshot(false, 0L, 0L, 0L);
+		}
+
+		private long bytesFor(CacheMetric metric) {
+			return switch (metric) {
+				case OSM -> this.osmBytes;
+				case ESA -> this.esaBytes;
+				case TERRAIN -> this.terrainBytes;
+				case TOTAL -> totalBytes();
+			};
+		}
+
+		private long totalBytes() {
+			return this.osmBytes + this.esaBytes + this.terrainBytes;
+		}
+	}
+
+	private static final class CacheManager {
+		private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(new CacheThreadFactory());
+		private static final AtomicReference<CacheSnapshot> SNAPSHOT = new AtomicReference<>(CacheSnapshot.empty());
+		private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
+
+		private static CacheSnapshot snapshot() {
+			return SNAPSHOT.get();
+		}
+
+		private static void requestRefresh() {
+			refreshAsync(null);
+		}
+
+		private static void delete(CacheMetric metric) {
+			Path path = metric.resolvePath();
+			if (path == null) {
+				return;
+			}
+			refreshAsync(() -> deleteDirectory(path));
+		}
+
+		private static void deleteAll() {
+			refreshAsync(() -> {
+				for (CacheMetric metric : CacheMetric.values()) {
+					Path path = metric.resolvePath();
+					if (path != null) {
+						deleteDirectory(path);
+					}
+				}
+			});
+		}
+
+		private static void refreshAsync(@Nullable Runnable task) {
+			if (!IN_FLIGHT.compareAndSet(false, true)) {
+				return;
+			}
+			SNAPSHOT.set(CacheSnapshot.empty());
+			CompletableFuture.supplyAsync(() -> {
+						if (task != null) {
+							task.run();
+						}
+						return computeSnapshot();
+					}, EXECUTOR)
+					.whenComplete((snapshot, error) -> {
+						if (snapshot != null && error == null) {
+							SNAPSHOT.set(snapshot);
+						} else {
+							SNAPSHOT.set(CacheSnapshot.empty());
+						}
+						IN_FLIGHT.set(false);
+					});
+		}
+
+		private static CacheSnapshot computeSnapshot() {
+			long osmBytes = sizeFor(CacheMetric.OSM);
+			long esaBytes = sizeFor(CacheMetric.ESA);
+			long terrainBytes = sizeFor(CacheMetric.TERRAIN);
+			return new CacheSnapshot(true, osmBytes, esaBytes, terrainBytes);
+		}
+
+		private static long sizeFor(CacheMetric metric) {
+			Path path = metric.resolvePath();
+			if (path == null || !Files.exists(path)) {
+				return 0L;
+			}
+			try (var stream = Files.walk(path)) {
+				return stream.filter(Files::isRegularFile)
+						.mapToLong(file -> {
+							try {
+								return Files.size(file);
+							} catch (IOException e) {
+								return 0L;
+							}
+						})
+						.sum();
+			} catch (IOException e) {
+				Tellus.LOGGER.warn("Failed to scan cache at {}", path, e);
+				return 0L;
+			}
+		}
+
+		private static void deleteDirectory(Path root) {
+			if (!Files.exists(root)) {
+				return;
+			}
+			try (var stream = Files.walk(root)) {
+				stream.sorted((a, b) -> b.getNameCount() - a.getNameCount())
+						.forEach(path -> {
+							try {
+								Files.deleteIfExists(path);
+							} catch (IOException e) {
+								Tellus.LOGGER.warn("Failed to delete cache path {}", path, e);
+							}
+						});
+			} catch (IOException e) {
+				Tellus.LOGGER.warn("Failed to delete cache folder {}", root, e);
+			}
+		}
+	}
+
+	private static final class CacheThreadFactory implements ThreadFactory {
+		private int index;
+
+		@Override
+		public Thread newThread(Runnable runnable) {
+			Thread thread = new Thread(runnable, "tellus-cache-" + (++this.index));
+			thread.setDaemon(true);
+			return thread;
 		}
 	}
 

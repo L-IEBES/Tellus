@@ -38,8 +38,6 @@ public final class TellusLandCoverSource {
 	private static final int NO_DATA_CLASS = 0;
 	private static final int MAX_CACHE_TILES = intProperty("tellus.landcover.cacheTiles", 64);
 	private static final double RESOLUTION_METERS = 10.0;
-	private static final double DOWNSAMPLE_START_PIXELS = 4.0;
-	private static final int MAX_DOWNSAMPLE_STEP = 256;
 	private static final int TILE_CACHE_ENTRIES = intProperty("tellus.landcover.tileCacheEntries", 32);
 	private static final int SMOOTH_RADIUS_PIXELS = 1;
 	private static final ThreadLocal<CoverSmoothScratch> COVER_SMOOTH_SCRATCH =
@@ -193,15 +191,7 @@ public final class TellusLandCoverSource {
 	}
 
 	private static int downsampleStep(double worldScale, double resolutionMeters) {
-		if (worldScale <= 0.0 || resolutionMeters <= 0.0) {
-			return 1;
-		}
-		double pixelsPerBlock = worldScale / resolutionMeters;
-		if (pixelsPerBlock <= DOWNSAMPLE_START_PIXELS) {
-			return 1;
-		}
-		int step = (int) Math.floor(pixelsPerBlock / DOWNSAMPLE_START_PIXELS);
-		return Mth.clamp(step, 1, MAX_DOWNSAMPLE_STEP);
+		return 1;
 	}
 
 	private static double downsampleBlock(double blockCoord, int step) {

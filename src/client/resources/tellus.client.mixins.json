@@ -5,6 +5,7 @@
 	"client": [
 		"ExampleClientMixin",
 		"GuiGraphicsAccessor",
+		"LevelLoadingScreenMixin",
 		"PresetEditorMixin"
 	],
 	"injectors": {

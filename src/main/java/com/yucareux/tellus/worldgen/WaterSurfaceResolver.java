@@ -27,6 +27,9 @@ public final class WaterSurfaceResolver {
 	private static final int INLAND_MAX_DEPTH = 30;
 	private static final int INLAND_DEEP_DISTANCE_STEP = 6;
 	private static final int OCEAN_MIN_DEPTH = 1;
+	private static final int MAX_WATER_WALL_HEIGHT = 8;
+	private static final int WATER_CASCADE_STEP_HEIGHT = 2;
+	private static final int WATER_TERRACE_TRIGGER_HEIGHT = 6;
 	private static final int CLIFF_SLOPE_THRESHOLD = 5;
 	private static final double RIVER_MIN_LENGTH_METERS = 750.0;
 	private static final double RIVER_MAX_WIDTH_METERS = 400.0;
@@ -532,6 +535,14 @@ public final class WaterSurfaceResolver {
 			landMask[index] = !waterMask[index];
 		}
 
+		applyWaterSurfaceTerraces(
+				waterSurface,
+				surfaceHeights,
+				inlandWaterMask,
+				landMask,
+				gridSize
+		);
+
 		boolean[] cliffLandMask = scratch.cliffLandMask;
 		boolean[] cliffWaterMask = scratch.cliffWaterMask;
 		Arrays.fill(cliffLandMask, 0, gridArea, false);
@@ -669,6 +680,15 @@ public final class WaterSurfaceResolver {
 					gridSize
 			);
 		}
+
+		applyShorelineWallClamp(
+				terrainSurface,
+				waterSurface,
+				waterMask,
+				landMask,
+				cliffLandMask,
+				gridSize
+		);
 
 		int[] regionTerrain = new int[REGION_SIZE * REGION_SIZE];
 		int[] regionWater = new int[REGION_SIZE * REGION_SIZE];
@@ -934,6 +954,129 @@ public final class WaterSurfaceResolver {
 			}
 		}
 		return false;
+	}
+
+	private void applyWaterSurfaceTerraces(
+			int[] waterSurface,
+			int[] surfaceHeights,
+			boolean[] inlandWaterMask,
+			boolean[] landMask,
+			int gridSize
+	) {
+		int gridArea = gridSize * gridSize;
+		RegionScratch scratch = REGION_SCRATCH.get();
+		IntArrayList queue = scratch.cascadeQueue;
+		queue.clear();
+		boolean[] cascadeMask = scratch.cascadeMask;
+		Arrays.fill(cascadeMask, 0, gridArea, false);
+
+		for (int index = 0; index < gridArea; index++) {
+			if (!inlandWaterMask[index]) {
+				continue;
+			}
+			int x = index % gridSize;
+			int z = index / gridSize;
+			int minLandHeight = Integer.MAX_VALUE;
+			for (int i = 0; i < NEIGHBOR_OFFSETS.length; i += 2) {
+				int nx = x + NEIGHBOR_OFFSETS[i];
+				int nz = z + NEIGHBOR_OFFSETS[i + 1];
+				if (nx < 0 || nz < 0 || nx >= gridSize || nz >= gridSize) {
+					continue;
+				}
+				int neighbor = nz * gridSize + nx;
+				if (!landMask[neighbor]) {
+					continue;
+				}
+				minLandHeight = Math.min(minLandHeight, surfaceHeights[neighbor]);
+			}
+			int surface = waterSurface[index];
+			int cap = Integer.MAX_VALUE;
+			if (MAX_WATER_WALL_HEIGHT > 0 && minLandHeight != Integer.MAX_VALUE) {
+				cap = minLandHeight + MAX_WATER_WALL_HEIGHT;
+				if (surface > cap) {
+					surface = cap;
+				}
+			}
+			int minSurface = surfaceHeights[index] + 1;
+			boolean shouldTerrace = minSurface <= cap && minSurface - surface > WATER_TERRACE_TRIGGER_HEIGHT;
+			if (shouldTerrace) {
+				surface = minSurface;
+			}
+			waterSurface[index] = surface;
+			if (shouldTerrace) {
+				cascadeMask[index] = true;
+				queue.add(index);
+			}
+		}
+
+		for (int qi = 0; qi < queue.size(); qi++) {
+			int index = queue.getInt(qi);
+			if (!cascadeMask[index]) {
+				continue;
+			}
+			int x = index % gridSize;
+			int z = index / gridSize;
+			int surface = waterSurface[index];
+			for (int i = 0; i < NEIGHBOR_OFFSETS.length; i += 2) {
+				int nx = x + NEIGHBOR_OFFSETS[i];
+				int nz = z + NEIGHBOR_OFFSETS[i + 1];
+				if (nx < 0 || nz < 0 || nx >= gridSize || nz >= gridSize) {
+					continue;
+				}
+				int neighbor = nz * gridSize + nx;
+				if (!cascadeMask[neighbor]) {
+					continue;
+				}
+				int target = surface + WATER_CASCADE_STEP_HEIGHT;
+				int minSurface = surfaceHeights[neighbor] + 1;
+				if (target < minSurface) {
+					target = minSurface;
+				}
+				if (target < waterSurface[neighbor]) {
+					waterSurface[neighbor] = target;
+					queue.add(neighbor);
+				}
+			}
+		}
+	}
+
+	private void applyShorelineWallClamp(
+			int[] terrainSurface,
+			int[] waterSurface,
+			boolean[] waterMask,
+			boolean[] landMask,
+			boolean[] cliffLandMask,
+			int gridSize
+	) {
+		int gridArea = gridSize * gridSize;
+		for (int index = 0; index < gridArea; index++) {
+			if (!landMask[index] || cliffLandMask[index]) {
+				continue;
+			}
+			int x = index % gridSize;
+			int z = index / gridSize;
+			int minWaterSurface = Integer.MAX_VALUE;
+			for (int i = 0; i < NEIGHBOR_OFFSETS.length; i += 2) {
+				int nx = x + NEIGHBOR_OFFSETS[i];
+				int nz = z + NEIGHBOR_OFFSETS[i + 1];
+				if (nx < 0 || nz < 0 || nx >= gridSize || nz >= gridSize) {
+					continue;
+				}
+				int neighbor = nz * gridSize + nx;
+				if (!waterMask[neighbor]) {
+					continue;
+				}
+				minWaterSurface = Math.min(minWaterSurface, waterSurface[neighbor]);
+			}
+			if (minWaterSurface == Integer.MAX_VALUE) {
+				continue;
+			}
+			int terrain = terrainSurface[index];
+			int diff = minWaterSurface - terrain;
+			if (diff > 0 && diff <= WATER_CASCADE_STEP_HEIGHT) {
+				terrainSurface[index] = minWaterSurface;
+			}
+		}
 	}
 
 	private void applyShorelineBlend(
@@ -1452,12 +1595,14 @@ public final class WaterSurfaceResolver {
 		private boolean[] cliffLandMask;
 		private boolean[] cliffWaterMask;
 		private boolean[] blendLandMask;
+		private boolean[] cascadeMask;
 		private int[] waterDistanceCost;
 		private int[] landDistanceCost;
 		private int[] nearestSurface;
 		private boolean[] landSource;
 		private final IntArrayList shoreWater = new IntArrayList();
 		private final IntArrayList shoreLand = new IntArrayList();
+		private final IntArrayList cascadeQueue = new IntArrayList();
 		private int coarseCapacity;
 		private boolean[] coarseWater;
 		private boolean[] coarseInlandSeed;
@@ -1490,6 +1635,7 @@ public final class WaterSurfaceResolver {
 			this.cliffLandMask = new boolean[size];
 			this.cliffWaterMask = new boolean[size];
 			this.blendLandMask = new boolean[size];
+			this.cascadeMask = new boolean[size];
 			this.waterDistanceCost = new int[size];
 			this.landDistanceCost = new int[size];
 			this.nearestSurface = new int[size];
@@ -1518,6 +1664,7 @@ public final class WaterSurfaceResolver {
 		private void resetLists() {
 			this.shoreWater.clear();
 			this.shoreLand.clear();
+			this.cascadeQueue.clear();
 		}
 	}
 

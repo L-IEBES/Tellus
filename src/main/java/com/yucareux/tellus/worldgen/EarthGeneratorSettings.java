@@ -28,14 +28,8 @@ public record EarthGeneratorSettings(
 		int riverLakeShorelineBlend,
 		int oceanShorelineBlend,
 		boolean shorelineBlendCliffLimit,
-		boolean caveCarvers,
-		boolean largeCaves,
-		boolean canyonCarvers,
-		boolean aquifers,
-		boolean dripstone,
-		boolean deepDark,
+		boolean caveGeneration,
 		boolean oreDistribution,
-		boolean geodes,
 		boolean lavaPools,
 		boolean addStrongholds,
 		boolean addVillages,
@@ -54,6 +48,8 @@ public record EarthGeneratorSettings(
 		boolean addAncientCities,
 		boolean addTrialChambers,
 		boolean addTrailRuins,
+		boolean deepDark,
+		boolean geodes,
 		boolean distantHorizonsWaterResolver,
 		boolean realtimeTime,
 		boolean realtimeWeather,
@@ -73,6 +69,11 @@ public record EarthGeneratorSettings(
 	private static final int HEIGHT_ALIGNMENT = 16;
 	private static final double EVEREST_ELEVATION_METERS = 8848.0;
 	private static final double MARIANA_TRENCH_METERS = -11034.0;
+	private static final double MAX_WORLD_SCALE = 1000.0;
+
+	public EarthGeneratorSettings {
+		worldScale = clampWorldScale(worldScale);
+	}
 
 	public static final EarthGeneratorSettings DEFAULT = new EarthGeneratorSettings(
 			35.0,
@@ -90,15 +91,6 @@ public record EarthGeneratorSettings(
 			false,
 			false,
 			false,
-			false,
-			false,
-			false,
-			false,
-			false,
-			false,
-			false,
-			true,
-			false,
 			true,
 			true,
 			true,
@@ -110,8 +102,13 @@ public record EarthGeneratorSettings(
 			true,
 			true,
 			true,
-			false,
-			false,
+			true,
+			true,
+			true,
+			true,
+			true,
+			true,
+			true,
 			true,
 			false,
 			false,
@@ -121,22 +118,13 @@ public record EarthGeneratorSettings(
 	);
 
 	private static final MapCodec<BaseToggles> BASE_TOGGLES_CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
-			Codec.BOOL.fieldOf("cave_carvers").orElse(DEFAULT.caveCarvers()).forGetter(BaseToggles::caveCarvers),
-			Codec.BOOL.fieldOf("large_caves").orElse(DEFAULT.largeCaves()).forGetter(BaseToggles::largeCaves),
-			Codec.BOOL.fieldOf("canyon_carvers").orElse(DEFAULT.canyonCarvers()).forGetter(BaseToggles::canyonCarvers),
-			Codec.BOOL.fieldOf("aquifers").orElse(DEFAULT.aquifers()).forGetter(BaseToggles::aquifers),
-			Codec.BOOL.fieldOf("dripstone").orElse(DEFAULT.dripstone()).forGetter(BaseToggles::dripstone),
-			Codec.BOOL.fieldOf("deep_dark").orElse(DEFAULT.deepDark()).forGetter(BaseToggles::deepDark),
-			Codec.BOOL.fieldOf("ore_distribution").orElse(DEFAULT.oreDistribution()).forGetter(BaseToggles::oreDistribution)
-	).apply(instance, (caveCarvers, largeCaves, canyonCarvers, aquifers, dripstone, deepDark, oreDistribution) -> new BaseToggles(
-			Objects.requireNonNull(caveCarvers, "caveCarvers").booleanValue(),
-			Objects.requireNonNull(largeCaves, "largeCaves").booleanValue(),
-			Objects.requireNonNull(canyonCarvers, "canyonCarvers").booleanValue(),
-			Objects.requireNonNull(aquifers, "aquifers").booleanValue(),
-			Objects.requireNonNull(dripstone, "dripstone").booleanValue(),
-			Objects.requireNonNull(deepDark, "deepDark").booleanValue(),
-			Objects.requireNonNull(oreDistribution, "oreDistribution").booleanValue()
-	)));
+			Codec.BOOL.optionalFieldOf("cave_generation").forGetter(BaseToggles::caveGeneration),
+			Codec.BOOL.optionalFieldOf("cave_carvers").forGetter(BaseToggles::caveCarvers),
+			Codec.BOOL.optionalFieldOf("large_caves").forGetter(BaseToggles::largeCaves),
+			Codec.BOOL.optionalFieldOf("canyon_carvers").forGetter(BaseToggles::canyonCarvers),
+			Codec.BOOL.fieldOf("ore_distribution").orElse(DEFAULT.oreDistribution()).forGetter(BaseToggles::oreDistribution),
+			Codec.BOOL.fieldOf("lava_pools").orElse(DEFAULT.lavaPools()).forGetter(BaseToggles::lavaPools)
+	).apply(instance, EarthGeneratorSettings::createBaseToggles));
 
 	private static final MapCodec<SettingsBase> BASE_CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
 			Codec.DOUBLE.fieldOf("world_scale").orElse(DEFAULT.worldScale()).forGetter(SettingsBase::worldScale),
@@ -156,13 +144,12 @@ public record EarthGeneratorSettings(
 			Codec.BOOL.fieldOf("shoreline_blend_cliff_limit").orElse(DEFAULT.shorelineBlendCliffLimit())
 					.forGetter(SettingsBase::shorelineBlendCliffLimit),
 			BASE_TOGGLES_CODEC.forGetter(settings -> new BaseToggles(
-					settings.caveCarvers(),
-					settings.largeCaves(),
-					settings.canyonCarvers(),
-					settings.aquifers(),
-					settings.dripstone(),
-					settings.deepDark(),
-					settings.oreDistribution()
+					Optional.of(settings.caveGeneration()),
+					Optional.empty(),
+					Optional.empty(),
+					Optional.empty(),
+					settings.oreDistribution(),
+					settings.lavaPools()
 			))
 	).apply(instance, (worldScale, terrestrialHeightScale, oceanicHeightScale, heightOffset, spawnLatitude, spawnLongitude,
 			minAltitude, maxAltitude, riverLakeShorelineBlend, oceanShorelineBlend, shorelineBlendCliffLimit, toggles) -> createSettingsBase(
@@ -177,13 +164,9 @@ public record EarthGeneratorSettings(
 			riverLakeShorelineBlend,
 			oceanShorelineBlend,
 			shorelineBlendCliffLimit,
-			toggles.caveCarvers(),
-			toggles.largeCaves(),
-			toggles.canyonCarvers(),
-			toggles.aquifers(),
-			toggles.dripstone(),
-			toggles.deepDark(),
-			toggles.oreDistribution()
+			toggles.resolveCaveGeneration(),
+			toggles.oreDistribution(),
+			toggles.lavaPools()
 	)));
 
 	private static final MapCodec<Optional<Integer>> SEA_LEVEL_CODEC =
@@ -205,11 +188,11 @@ public record EarthGeneratorSettings(
 	private static final MapCodec<Boolean> HISTORICAL_SNOW_CODEC =
 			Codec.BOOL.fieldOf("historical_snow").orElse(DEFAULT.historicalSnow());
 
+	private static final MapCodec<Boolean> DEEP_DARK_CODEC =
+			Codec.BOOL.fieldOf("deep_dark").orElse(DEFAULT.deepDark());
+
 	private static final MapCodec<Boolean> GEODES_CODEC =
 			Codec.BOOL.fieldOf("geodes").orElse(DEFAULT.geodes());
-
-	private static final MapCodec<Boolean> LAVA_POOLS_CODEC =
-			Codec.BOOL.fieldOf("lava_pools").orElse(DEFAULT.lavaPools());
 
 	private static final MapCodec<StructureSettings> STRUCTURE_CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
 			Codec.BOOL.fieldOf("add_strongholds").orElse(DEFAULT.addStrongholds()).forGetter(StructureSettings::addStrongholds),
@@ -247,8 +230,8 @@ public record EarthGeneratorSettings(
 					builder = REALTIME_TIME_CODEC.encode(input.realtimeTime(), ops, builder);
 					builder = REALTIME_WEATHER_CODEC.encode(input.realtimeWeather(), ops, builder);
 					builder = HISTORICAL_SNOW_CODEC.encode(input.historicalSnow(), ops, builder);
+					builder = DEEP_DARK_CODEC.encode(input.deepDark(), ops, builder);
 					builder = GEODES_CODEC.encode(input.geodes(), ops, builder);
-					builder = LAVA_POOLS_CODEC.encode(input.lavaPools(), ops, builder);
 					builder = STRUCTURE_CODEC.encode(StructureSettings.fromSettings(input), ops, builder);
 					return TRAIL_RUINS_CODEC.encode(input.addTrailRuins(), ops, builder);
 				}
@@ -261,8 +244,8 @@ public record EarthGeneratorSettings(
 					baseKeys = Stream.concat(baseKeys, REALTIME_TIME_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, REALTIME_WEATHER_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, HISTORICAL_SNOW_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, DEEP_DARK_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, GEODES_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, LAVA_POOLS_CODEC.keys(ops));
 					Stream<T> structureKeys = Stream.concat(baseKeys, STRUCTURE_CODEC.keys(ops));
 					return Stream.concat(structureKeys, TRAIL_RUINS_CODEC.keys(ops));
 				}
@@ -279,8 +262,8 @@ public record EarthGeneratorSettings(
 					DataResult<Boolean> realtimeTime = REALTIME_TIME_CODEC.decode(ops, input);
 					DataResult<Boolean> realtimeWeather = REALTIME_WEATHER_CODEC.decode(ops, input);
 					DataResult<Boolean> historicalSnow = HISTORICAL_SNOW_CODEC.decode(ops, input);
+					DataResult<Boolean> deepDark = DEEP_DARK_CODEC.decode(ops, input);
 					DataResult<Boolean> geodes = GEODES_CODEC.decode(ops, input);
-					DataResult<Boolean> lavaPools = LAVA_POOLS_CODEC.decode(ops, input);
 					DataResult<StructureSettings> structures = STRUCTURE_CODEC.decode(ops, input);
 					DataResult<Boolean> trailRuins = TRAIL_RUINS_CODEC.decode(ops, input);
 					DataResult<SettingsBase> withSeaLevel = base.apply2(EarthGeneratorSettings::applySeaLevel, seaLevel);
@@ -304,8 +287,9 @@ public record EarthGeneratorSettings(
 							EarthGeneratorSettings::applyHistoricalSnow,
 							historicalSnow
 					);
-					DataResult<SettingsBase> withGeodes = withHistoricalSnow.apply2(EarthGeneratorSettings::applyGeodes, geodes);
-					DataResult<EarthGeneratorSettings> settings = withGeodes.apply2(EarthGeneratorSettings::applyLavaPools, lavaPools);
+					DataResult<EarthGeneratorSettings> settings = withHistoricalSnow.map(SettingsBase::toSettings);
+					settings = settings.apply2(EarthGeneratorSettings::applyDeepDark, deepDark);
+					settings = settings.apply2(EarthGeneratorSettings::applyGeodes, geodes);
 					settings = settings.apply2(EarthGeneratorSettings::withStructureSettings, structures);
 					return settings.apply2(EarthGeneratorSettings::applyTrailRuins, trailRuins);
 				}
@@ -318,8 +302,8 @@ public record EarthGeneratorSettings(
 					baseKeys = Stream.concat(baseKeys, REALTIME_TIME_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, REALTIME_WEATHER_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, HISTORICAL_SNOW_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, DEEP_DARK_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, GEODES_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, LAVA_POOLS_CODEC.keys(ops));
 					Stream<T> structureKeys = Stream.concat(baseKeys, STRUCTURE_CODEC.keys(ops));
 					return Stream.concat(structureKeys, TRAIL_RUINS_CODEC.keys(ops));
 				}
@@ -389,18 +373,15 @@ public record EarthGeneratorSettings(
 			Integer riverLakeShorelineBlend,
 			Integer oceanShorelineBlend,
 			Boolean shorelineBlendCliffLimit,
-			Boolean caveCarvers,
-			Boolean largeCaves,
-			Boolean canyonCarvers,
-			Boolean aquifers,
-			Boolean dripstone,
-			Boolean deepDark,
-			Boolean oreDistribution
+			Boolean caveGeneration,
+			Boolean oreDistribution,
+			Boolean lavaPools
 	) {
 		int resolvedHeightOffset = Objects.requireNonNull(heightOffset, "heightOffset").intValue();
 		int resolvedSeaLevel = AUTO_SEA_LEVEL;
+		double resolvedWorldScale = clampWorldScale(Objects.requireNonNull(worldScale, "worldScale").doubleValue());
 		return new SettingsBase(
-				Objects.requireNonNull(worldScale, "worldScale").doubleValue(),
+				resolvedWorldScale,
 				Objects.requireNonNull(terrestrialHeightScale, "terrestrialHeightScale").doubleValue(),
 				Objects.requireNonNull(oceanicHeightScale, "oceanicHeightScale").doubleValue(),
 				resolvedHeightOffset,
@@ -412,31 +393,64 @@ public record EarthGeneratorSettings(
 				Objects.requireNonNull(riverLakeShorelineBlend, "riverLakeShorelineBlend").intValue(),
 				Objects.requireNonNull(oceanShorelineBlend, "oceanShorelineBlend").intValue(),
 				Objects.requireNonNull(shorelineBlendCliffLimit, "shorelineBlendCliffLimit").booleanValue(),
-				Objects.requireNonNull(caveCarvers, "caveCarvers").booleanValue(),
-				Objects.requireNonNull(largeCaves, "largeCaves").booleanValue(),
-				Objects.requireNonNull(canyonCarvers, "canyonCarvers").booleanValue(),
-				Objects.requireNonNull(aquifers, "aquifers").booleanValue(),
-				Objects.requireNonNull(dripstone, "dripstone").booleanValue(),
-				Objects.requireNonNull(deepDark, "deepDark").booleanValue(),
+				Objects.requireNonNull(caveGeneration, "caveGeneration").booleanValue(),
 				Objects.requireNonNull(oreDistribution, "oreDistribution").booleanValue(),
+				Objects.requireNonNull(lavaPools, "lavaPools").booleanValue(),
 				DEFAULT.distantHorizonsWaterResolver(),
 				DEFAULT.realtimeTime(),
 				DEFAULT.realtimeWeather(),
-				DEFAULT.historicalSnow(),
-				DEFAULT.distantHorizonsRenderMode(),
-				DEFAULT.geodes()
+					DEFAULT.historicalSnow(),
+					DEFAULT.distantHorizonsRenderMode()
+			);
+	}
+
+	private static BaseToggles createBaseToggles(
+			Optional<Boolean> caveGeneration,
+			Optional<Boolean> caveCarvers,
+			Optional<Boolean> largeCaves,
+			Optional<Boolean> canyonCarvers,
+			Boolean oreDistribution,
+			Boolean lavaPools
+	) {
+		return new BaseToggles(
+				caveGeneration,
+				caveCarvers,
+				largeCaves,
+				canyonCarvers,
+				Objects.requireNonNull(oreDistribution, "oreDistribution").booleanValue(),
+				Objects.requireNonNull(lavaPools, "lavaPools").booleanValue()
 		);
 	}
 
+	private static double clampWorldScale(double worldScale) {
+		if (worldScale <= 0.0) {
+			return worldScale;
+		}
+		return Math.min(worldScale, MAX_WORLD_SCALE);
+	}
+
 	private record BaseToggles(
-			boolean caveCarvers,
-			boolean largeCaves,
-			boolean canyonCarvers,
-			boolean aquifers,
-			boolean dripstone,
-			boolean deepDark,
-			boolean oreDistribution
+			Optional<Boolean> caveGeneration,
+			Optional<Boolean> caveCarvers,
+			Optional<Boolean> largeCaves,
+			Optional<Boolean> canyonCarvers,
+			boolean oreDistribution,
+			boolean lavaPools
 	) {
+		private boolean resolveCaveGeneration() {
+			if (this.caveGeneration.isPresent()) {
+				return this.caveGeneration.get().booleanValue();
+			}
+			boolean hasLegacy = this.caveCarvers.isPresent()
+					|| this.largeCaves.isPresent()
+					|| this.canyonCarvers.isPresent();
+			if (hasLegacy) {
+				return this.caveCarvers.orElse(false)
+						|| this.largeCaves.orElse(false)
+						|| this.canyonCarvers.orElse(false);
+			}
+			return DEFAULT.caveGeneration();
+		}
 	}
 
 	private record SettingsBase(
@@ -452,19 +466,14 @@ public record EarthGeneratorSettings(
 			int riverLakeShorelineBlend,
 			int oceanShorelineBlend,
 			boolean shorelineBlendCliffLimit,
-			boolean caveCarvers,
-			boolean largeCaves,
-			boolean canyonCarvers,
-			boolean aquifers,
-			boolean dripstone,
-			boolean deepDark,
+			boolean caveGeneration,
 			boolean oreDistribution,
+			boolean lavaPools,
 			boolean distantHorizonsWaterResolver,
 			boolean realtimeTime,
 			boolean realtimeWeather,
 			boolean historicalSnow,
-			DistantHorizonsRenderMode distantHorizonsRenderMode,
-			boolean geodes
+			DistantHorizonsRenderMode distantHorizonsRenderMode
 	) {
 		private static SettingsBase fromSettings(EarthGeneratorSettings settings) {
 			return new SettingsBase(
@@ -480,19 +489,14 @@ public record EarthGeneratorSettings(
 					settings.riverLakeShorelineBlend(),
 					settings.oceanShorelineBlend(),
 					settings.shorelineBlendCliffLimit(),
-					settings.caveCarvers(),
-					settings.largeCaves(),
-					settings.canyonCarvers(),
-					settings.aquifers(),
-					settings.dripstone(),
-					settings.deepDark(),
+					settings.caveGeneration(),
 					settings.oreDistribution(),
+					settings.lavaPools(),
 					settings.distantHorizonsWaterResolver(),
 					settings.realtimeTime(),
 					settings.realtimeWeather(),
 					settings.historicalSnow(),
-					settings.distantHorizonsRenderMode(),
-					settings.geodes()
+					settings.distantHorizonsRenderMode()
 			);
 		}
 
@@ -510,49 +514,14 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
+					this.lavaPools,
 					this.distantHorizonsWaterResolver,
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode,
-					this.geodes
-			);
-		}
-
-		private SettingsBase withGeodes(boolean geodes) {
-			return new SettingsBase(
-					this.worldScale,
-					this.terrestrialHeightScale,
-					this.oceanicHeightScale,
-					this.heightOffset,
-					this.seaLevel,
-					this.spawnLatitude,
-					this.spawnLongitude,
-					this.minAltitude,
-					this.maxAltitude,
-					this.riverLakeShorelineBlend,
-					this.oceanShorelineBlend,
-					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
-					this.oreDistribution,
-					this.distantHorizonsWaterResolver,
-					this.realtimeTime,
-					this.realtimeWeather,
-					this.historicalSnow,
-					this.distantHorizonsRenderMode,
-					geodes
+					this.distantHorizonsRenderMode
 			);
 		}
 
@@ -570,19 +539,14 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
+					this.lavaPools,
 					enabled,
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode,
-					this.geodes
+					this.distantHorizonsRenderMode
 			);
 		}
 
@@ -600,19 +564,14 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
+					this.lavaPools,
 					this.distantHorizonsWaterResolver,
 					enabled,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode,
-					this.geodes
+					this.distantHorizonsRenderMode
 			);
 		}
 
@@ -630,19 +589,14 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
+					this.lavaPools,
 					this.distantHorizonsWaterResolver,
 					this.realtimeTime,
 					enabled,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode,
-					this.geodes
+					this.distantHorizonsRenderMode
 			);
 		}
 
@@ -660,19 +614,14 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
+					this.lavaPools,
 					this.distantHorizonsWaterResolver,
 					this.realtimeTime,
 					this.realtimeWeather,
 					enabled,
-					this.distantHorizonsRenderMode,
-					this.geodes
+					this.distantHorizonsRenderMode
 			);
 		}
 
@@ -690,23 +639,18 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
+					this.lavaPools,
 					this.distantHorizonsWaterResolver,
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					renderMode,
-					this.geodes
+					renderMode
 			);
 		}
 
-		private EarthGeneratorSettings withLavaPools(boolean lavaPools) {
+		private EarthGeneratorSettings toSettings() {
 			return new EarthGeneratorSettings(
 					this.worldScale,
 					this.terrestrialHeightScale,
@@ -720,15 +664,9 @@ public record EarthGeneratorSettings(
 					this.riverLakeShorelineBlend,
 					this.oceanShorelineBlend,
 					this.shorelineBlendCliffLimit,
-					this.caveCarvers,
-					this.largeCaves,
-					this.canyonCarvers,
-					this.aquifers,
-					this.dripstone,
-					this.deepDark,
+					this.caveGeneration,
 					this.oreDistribution,
-					this.geodes,
-					lavaPools,
+					this.lavaPools,
 					DEFAULT.addStrongholds(),
 					DEFAULT.addVillages(),
 					DEFAULT.addMineshafts(),
@@ -746,6 +684,8 @@ public record EarthGeneratorSettings(
 					DEFAULT.addAncientCities(),
 					DEFAULT.addTrialChambers(),
 					DEFAULT.addTrailRuins(),
+					DEFAULT.deepDark(),
+					DEFAULT.geodes(),
 					this.distantHorizonsWaterResolver,
 					this.realtimeTime,
 					this.realtimeWeather,
@@ -753,10 +693,6 @@ public record EarthGeneratorSettings(
 					this.distantHorizonsRenderMode
 			);
 		}
-	}
-
-	private static EarthGeneratorSettings applyLavaPools(SettingsBase settings, Boolean lavaPools) {
-		return settings.withLavaPools(Objects.requireNonNull(lavaPools, "lavaPools").booleanValue());
 	}
 
 	private static SettingsBase applySeaLevel(SettingsBase settings, Optional<Integer> seaLevel) {
@@ -769,10 +705,6 @@ public record EarthGeneratorSettings(
 			return settings.withSeaLevel(AUTO_SEA_LEVEL);
 		}
 		return settings.withSeaLevel(resolved);
-	}
-
-	private static SettingsBase applyGeodes(SettingsBase settings, Boolean geodes) {
-		return settings.withGeodes(Objects.requireNonNull(geodes, "geodes").booleanValue());
 	}
 
 	private static SettingsBase applyDistantHorizonsRenderMode(
@@ -852,14 +784,8 @@ public record EarthGeneratorSettings(
 				this.riverLakeShorelineBlend,
 				this.oceanShorelineBlend,
 				this.shorelineBlendCliffLimit,
-				this.caveCarvers,
-				this.largeCaves,
-				this.canyonCarvers,
-				this.aquifers,
-				this.dripstone,
-				this.deepDark,
+				this.caveGeneration,
 				this.oreDistribution,
-				this.geodes,
 				this.lavaPools,
 				structures.addStrongholds(),
 				structures.addVillages(),
@@ -878,6 +804,8 @@ public record EarthGeneratorSettings(
 				structures.addAncientCities(),
 				structures.addTrialChambers(),
 				this.addTrailRuins,
+				this.deepDark,
+				this.geodes,
 				this.distantHorizonsWaterResolver,
 				this.realtimeTime,
 				this.realtimeWeather,
@@ -888,6 +816,14 @@ public record EarthGeneratorSettings(
 
 	private static EarthGeneratorSettings applyTrailRuins(EarthGeneratorSettings settings, Boolean addTrailRuins) {
 		return settings.withTrailRuins(Objects.requireNonNull(addTrailRuins, "addTrailRuins").booleanValue());
+	}
+
+	private static EarthGeneratorSettings applyDeepDark(EarthGeneratorSettings settings, Boolean deepDark) {
+		return settings.withDeepDark(Objects.requireNonNull(deepDark, "deepDark").booleanValue());
+	}
+
+	private static EarthGeneratorSettings applyGeodes(EarthGeneratorSettings settings, Boolean geodes) {
+		return settings.withGeodes(Objects.requireNonNull(geodes, "geodes").booleanValue());
 	}
 
 	private EarthGeneratorSettings withTrailRuins(boolean addTrailRuins) {
@@ -904,14 +840,8 @@ public record EarthGeneratorSettings(
 				this.riverLakeShorelineBlend,
 				this.oceanShorelineBlend,
 				this.shorelineBlendCliffLimit,
-				this.caveCarvers,
-				this.largeCaves,
-				this.canyonCarvers,
-				this.aquifers,
-				this.dripstone,
-				this.deepDark,
+				this.caveGeneration,
 				this.oreDistribution,
-				this.geodes,
 				this.lavaPools,
 				this.addStrongholds,
 				this.addVillages,
@@ -930,6 +860,96 @@ public record EarthGeneratorSettings(
 				this.addAncientCities,
 				this.addTrialChambers,
 				addTrailRuins,
+				this.deepDark,
+				this.geodes,
+				this.distantHorizonsWaterResolver,
+				this.realtimeTime,
+				this.realtimeWeather,
+				this.historicalSnow,
+				this.distantHorizonsRenderMode
+		);
+	}
+
+	private EarthGeneratorSettings withDeepDark(boolean deepDark) {
+		return new EarthGeneratorSettings(
+				this.worldScale,
+				this.terrestrialHeightScale,
+				this.oceanicHeightScale,
+				this.heightOffset,
+				this.seaLevel,
+				this.spawnLatitude,
+				this.spawnLongitude,
+				this.minAltitude,
+				this.maxAltitude,
+				this.riverLakeShorelineBlend,
+				this.oceanShorelineBlend,
+				this.shorelineBlendCliffLimit,
+				this.caveGeneration,
+				this.oreDistribution,
+				this.lavaPools,
+				this.addStrongholds,
+				this.addVillages,
+				this.addMineshafts,
+				this.addOceanMonuments,
+				this.addWoodlandMansions,
+				this.addDesertTemples,
+				this.addJungleTemples,
+				this.addPillagerOutposts,
+				this.addRuinedPortals,
+				this.addShipwrecks,
+				this.addOceanRuins,
+				this.addBuriedTreasure,
+				this.addIgloos,
+				this.addWitchHuts,
+				this.addAncientCities,
+				this.addTrialChambers,
+				this.addTrailRuins,
+				deepDark,
+				this.geodes,
+				this.distantHorizonsWaterResolver,
+				this.realtimeTime,
+				this.realtimeWeather,
+				this.historicalSnow,
+				this.distantHorizonsRenderMode
+		);
+	}
+
+	private EarthGeneratorSettings withGeodes(boolean geodes) {
+		return new EarthGeneratorSettings(
+				this.worldScale,
+				this.terrestrialHeightScale,
+				this.oceanicHeightScale,
+				this.heightOffset,
+				this.seaLevel,
+				this.spawnLatitude,
+				this.spawnLongitude,
+				this.minAltitude,
+				this.maxAltitude,
+				this.riverLakeShorelineBlend,
+				this.oceanShorelineBlend,
+				this.shorelineBlendCliffLimit,
+				this.caveGeneration,
+				this.oreDistribution,
+				this.lavaPools,
+				this.addStrongholds,
+				this.addVillages,
+				this.addMineshafts,
+				this.addOceanMonuments,
+				this.addWoodlandMansions,
+				this.addDesertTemples,
+				this.addJungleTemples,
+				this.addPillagerOutposts,
+				this.addRuinedPortals,
+				this.addShipwrecks,
+				this.addOceanRuins,
+				this.addBuriedTreasure,
+				this.addIgloos,
+				this.addWitchHuts,
+				this.addAncientCities,
+				this.addTrialChambers,
+				this.addTrailRuins,
+				this.deepDark,
+				geodes,
 				this.distantHorizonsWaterResolver,
 				this.realtimeTime,
 				this.realtimeWeather,

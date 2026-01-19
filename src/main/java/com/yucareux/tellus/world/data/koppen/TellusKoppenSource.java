@@ -26,8 +26,6 @@ public final class TellusKoppenSource {
 	private static final double MAX_LAT = 90.0;
 	private static final double MIN_LON = -180.0;
 	private static final double MAX_LON = 180.0;
-	private static final double DOWNSAMPLE_START_PIXELS = 4.0;
-	private static final int MAX_DOWNSAMPLE_STEP = 256;
 
 	private static final String RESOURCE_PATH = "tellus/koppen/koppen_geiger_0p00833333.tif";
 	private static final double SEARCH_RADIUS_METERS = 5000.0;
@@ -142,15 +140,7 @@ public final class TellusKoppenSource {
 	}
 
 	private static int downsampleStep(double worldScale, double resolutionMeters) {
-		if (worldScale <= 0.0 || resolutionMeters <= 0.0) {
-			return 1;
-		}
-		double pixelsPerBlock = worldScale / resolutionMeters;
-		if (pixelsPerBlock <= DOWNSAMPLE_START_PIXELS) {
-			return 1;
-		}
-		int step = (int) Math.floor(pixelsPerBlock / DOWNSAMPLE_START_PIXELS);
-		return Mth.clamp(step, 1, MAX_DOWNSAMPLE_STEP);
+		return 1;
 	}
 
 	private static double downsampleBlock(double blockCoord, int step) {

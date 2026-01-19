@@ -11,6 +11,7 @@ import java.io.Reader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import net.minecraft.util.Mth;
 
 public final class OpenMeteoClient {
@@ -40,6 +41,10 @@ public final class OpenMeteoClient {
 			}
 			JsonObject root = rootElement.getAsJsonObject();
 			int utcOffset = root.get("utc_offset_seconds").getAsInt();
+			String timezoneId = root.has("timezone") ? root.get("timezone").getAsString() : "UTC";
+			if (timezoneId == null || timezoneId.isBlank()) {
+				timezoneId = "UTC";
+			}
 			JsonObject current = root.getAsJsonObject("current");
 			int weatherCode = current.get("weather_code").getAsInt();
 			float temperature = current.get("temperature_2m").getAsFloat();
@@ -54,6 +59,7 @@ public final class OpenMeteoClient {
 					latitude,
 					longitude,
 					utcOffset,
+					timezoneId,
 					weatherCode,
 					temperature,
 					precipitation,
@@ -118,6 +124,7 @@ public final class OpenMeteoClient {
 			double latitude,
 			double longitude,
 			int utcOffsetSeconds,
+			String timeZoneId,
 			int weatherCode,
 			float temperatureC,
 			float precipitationMm,
@@ -125,6 +132,7 @@ public final class OpenMeteoClient {
 			float snowIndex
 	) {
 		public WeatherPointData {
+			timeZoneId = Objects.requireNonNullElse(timeZoneId, "UTC");
 		}
 	}
 

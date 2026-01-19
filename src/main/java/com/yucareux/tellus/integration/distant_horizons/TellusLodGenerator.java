@@ -613,6 +613,7 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 		final boolean isSavanna = biome.is(BiomeTags.IS_SAVANNA);
 		final boolean isOcean = biome.is(BiomeTags.IS_OCEAN);
 		final boolean isRiver = biome.is(BiomeTags.IS_RIVER);
+		final boolean isSavannaTree = isSavanna || isWindsweptSavanna || isSavannaPlateau;
 
 		final int canopyBaseChance;
 		if (isMangrove) {
@@ -660,12 +661,10 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 			canopyBaseRadius = 4;
 		} else if (isWindsweptForest || isWoodedBadlands) {
 			canopyBaseRadius = 2;
-		} else if (isWindsweptSavanna || isSavannaPlateau) {
-			canopyBaseRadius = 2;
+		} else if (isSavannaTree) {
+			canopyBaseRadius = 3;
 		} else if (isForest || isTaiga || isCherryGrove || isSwamp) {
 			canopyBaseRadius = 3;
-		} else if (isSavanna) {
-			canopyBaseRadius = 2;
 		} else {
 			canopyBaseRadius = 0;
 		}
@@ -918,6 +917,9 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 			}
 			return height;
 		}
+		if (profile.isSavannaFamily()) {
+			return 5 + jitter;
+		}
 		int height = 3 + jitter;
 		if (profile.isTallCanopy()) {
 			height = Math.min(5, height + 1);
@@ -1142,6 +1144,10 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 	) {
 		private boolean isTallCanopy() {
 			return isMangrove || isDarkForest || isJungle;
+		}
+
+		private boolean isSavannaFamily() {
+			return isSavanna || isWindsweptSavanna || isSavannaPlateau;
 		}
 	}
 

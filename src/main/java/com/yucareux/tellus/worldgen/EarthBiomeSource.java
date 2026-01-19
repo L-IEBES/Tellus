@@ -45,6 +45,7 @@ public final class EarthBiomeSource extends BiomeSource {
 	private final @NonNull Holder<Biome> frozenPeaks;
 	private final @NonNull Holder<Biome> mangrove;
 	private final @NonNull WaterSurfaceResolver waterResolver;
+	private volatile boolean fastSpawnMode = true;
 
 	public EarthBiomeSource(HolderGetter<Biome> biomeLookup, EarthGeneratorSettings settings) {
 		this.biomeLookup = Objects.requireNonNull(biomeLookup, "biomeLookup");
@@ -60,6 +61,10 @@ public final class EarthBiomeSource extends BiomeSource {
 
 	public EarthGeneratorSettings settings() {
 		return this.settings;
+	}
+
+	void setFastSpawnMode(boolean enabled) {
+		this.fastSpawnMode = enabled;
 	}
 
 	@Override
@@ -84,6 +89,9 @@ public final class EarthBiomeSource extends BiomeSource {
 	}
 
 	private @NonNull Holder<Biome> resolveBiomeAtBlock(int blockX, int blockZ) {
+		if (this.fastSpawnMode) {
+			return this.plains;
+		}
 		int coverClass = LAND_COVER_SOURCE.sampleCoverClass(blockX, blockZ, this.settings.worldScale());
 
 		if (coverClass == ESA_SNOW_ICE) {

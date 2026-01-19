@@ -28,8 +28,6 @@ public final class TellusElevationSource {
 	private static final double MIN_LON = -180.0;
 	private static final double MAX_LON = 180.0;
 	private static final double RESOLUTION_METERS = 30.0;
-	private static final double DOWNSAMPLE_START_PIXELS = 4.0;
-	private static final int MAX_DOWNSAMPLE_STEP = 256;
 	private static final String ENDPOINT = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium";
 	private static final int MAX_CACHE_TILES = intProperty("tellus.elevation.cacheTiles", 512);
 
@@ -140,15 +138,7 @@ public final class TellusElevationSource {
 	}
 
 	private static int downsampleStep(double worldScale, double resolutionMeters) {
-		if (worldScale <= 0.0 || resolutionMeters <= 0.0) {
-			return 1;
-		}
-		double pixelsPerBlock = worldScale / resolutionMeters;
-		if (pixelsPerBlock <= DOWNSAMPLE_START_PIXELS) {
-			return 1;
-		}
-		int step = (int) Math.floor(pixelsPerBlock / DOWNSAMPLE_START_PIXELS);
-		return Mth.clamp(step, 1, MAX_DOWNSAMPLE_STEP);
+		return 1;
 	}
 
 	private static double downsampleBlock(double blockCoord, int step) {
