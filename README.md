@@ -102,7 +102,7 @@ This section lets you toggle vanilla structures and world features on or off, su
 - https://doi.org/10.5281/zenodo.7254221
 - In-game processing: reprojected to the world grid, resampled to blocks, and cached as tiles for fast lookup.
 
-### Koppen-Geiger climate classification (1 km, Beck et al. 2018)
+### Koppen-Geiger climate classification
 - Source: Beck, H.E., Zimmermann, N.E., McVicar, T.R., et al. (2018).
 - Present and future Koppen-Geiger climate classification maps at 1-km resolution (Scientific Data).
 - License: CC BY 4.0
