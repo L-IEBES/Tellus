@@ -12,6 +12,7 @@ import com.seibel.distanthorizons.api.objects.data.DhApiTerrainDataPoint;
 import com.seibel.distanthorizons.api.objects.data.IDhApiFullDataSource;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
+import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import com.yucareux.tellus.worldgen.WaterSurfaceResolver;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
 import java.io.IOException;
@@ -54,8 +55,16 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 	private static final int WATER_VEG_MAX_DETAIL = 4;
 	private static final int ESA_NO_DATA = 0;
 	private static final int ESA_TREE_COVER = 10;
+	private static final int ESA_SHRUBLAND = 20;
+	private static final int ESA_GRASSLAND = 30;
+	private static final int ESA_CROPLAND = 40;
+	private static final int ESA_BUILT_UP = 50;
+	private static final int ESA_BARE_SPARSE = 60;
+	private static final int ESA_SNOW_ICE = 70;
 	private static final int ESA_WATER = 80;
+	private static final int ESA_HERBACEOUS_WETLAND = 90;
 	private static final int ESA_MANGROVES = 95;
+	private static final int ESA_MOSS_LICHEN = 100;
 	private static final int BADLANDS_LOD_BAND_DEPTH = 16;
 	private static final int BADLANDS_LOD_BAND_HEIGHT = 3;
 	private static final int BADLANDS_LOD_SLOPE_DIFF = 3;
@@ -67,6 +76,35 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 	private static final int LOD_DETAILED_WATER_STRIDE_DETAIL = 5;
 	private static final int LOD_COVER_DOWNSAMPLE_START_DETAIL = 7;
 	private static final int LOD_DOWNSAMPLE_MAX_STRIDE = 4;
+	private static final int ULTRA_FAST_BARE_STONE_OFFSET = 32;
+	private static final int ULTRA_FAST_TREE_SALT = 0x19E3779B;
+	private static final int ULTRA_FAST_TREE_CHANCE_PERCENT = 40;
+	private static final CanopyProfile TREE_COVER_FALLBACK_CANOPY_PROFILE = new CanopyProfile(
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			true,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			false,
+			70,
+			3,
+			2,
+			3,
+			10
+	);
 	private static final Map<Holder<Biome>, CanopyProfile> CANOPY_PROFILES = new ConcurrentHashMap<>();
 	private final IDhApiLevelWrapper levelWrapper;
 	private final EarthChunkGenerator generator;
@@ -114,6 +152,11 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 			final int chunkPosMinZ,
 			final byte detailLevel
 	) {
+		if (useUltraFastLodMode()) {
+			buildUltraFastLod(output, chunkPosMinX, chunkPosMinZ, detailLevel);
+			return;
+		}
+
 		final int lodSizePoints = output.getWidthInDataColumns();
 		final int cellSize = 1 << detailLevel;
 		final int cellOffset = cellSize >> 1;
@@ -310,7 +353,8 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 				final int coverClass = coverClasses[index];
 				final Holder<Biome> biomeHolder = biomeHolders[index];
 				final IDhApiBiomeWrapper biome = biomeWrappers[index];
-				final CanopyProfile canopyProfile = canopyProfile(biomeHolder);
+				final CanopyProfile biomeCanopyProfile = canopyProfile(biomeHolder);
+				final CanopyProfile canopyProfile = resolveTreeCoverCanopyProfile(biomeCanopyProfile, coverClass);
 				final boolean isMangrove = canopyProfile.isMangrove() || coverClass == ESA_MANGROVES;
 				final EarthChunkGenerator.LodSurface lodSurface =
 						generator.resolveLodSurface(biomeHolder, worldX, worldZ, surfaceY, underwater, coverClass);
@@ -451,6 +495,178 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 		}
 	}
 
+	private void buildUltraFastLod(
+			final IDhApiFullDataSource output,
+			final int chunkPosMinX,
+			final int chunkPosMinZ,
+			final byte detailLevel
+	) {
+		final int lodSizePoints = output.getWidthInDataColumns();
+		final int cellSize = 1 << detailLevel;
+		final int cellOffset = cellSize >> 1;
+		final int baseX = SectionPos.sectionToBlockCoord(chunkPosMinX);
+		final int baseZ = SectionPos.sectionToBlockCoord(chunkPosMinZ);
+		final int minY = levelWrapper.getMinHeight();
+		final int maxY = minY + levelWrapper.getMaxHeight();
+		final int absoluteTop = maxY - minY;
+		final WrapperCache wrappers = wrapperCache.get();
+		final IDhApiBlockStateWrapper fillerBlock = wrappers.getBlockState(Blocks.STONE.defaultBlockState());
+		final IDhApiBlockStateWrapper defaultLandTopBlock = wrappers.getBlockState(Blocks.GRASS_BLOCK.defaultBlockState());
+		final IDhApiBlockStateWrapper shrubTopBlock = wrappers.getBlockState(Blocks.COARSE_DIRT.defaultBlockState());
+		final IDhApiBlockStateWrapper bareTopBlock = wrappers.getBlockState(Blocks.SAND.defaultBlockState());
+		final IDhApiBlockStateWrapper stonyBareTopBlock = wrappers.getBlockState(Blocks.STONE.defaultBlockState());
+		final IDhApiBlockStateWrapper snowTopBlock = wrappers.getBlockState(Blocks.SNOW_BLOCK.defaultBlockState());
+		final IDhApiBlockStateWrapper wetlandTopBlock = wrappers.getBlockState(Blocks.MUD.defaultBlockState());
+		final IDhApiBlockStateWrapper builtTopBlock = wrappers.getBlockState(Blocks.STONE.defaultBlockState());
+		final IDhApiBlockStateWrapper mossTopBlock = wrappers.getBlockState(Blocks.MOSS_BLOCK.defaultBlockState());
+		final IDhApiBlockStateWrapper underwaterTopBlock = wrappers.getBlockState(Blocks.SAND.defaultBlockState());
+		final IDhApiBlockStateWrapper fakeTreeCanopyBlock = wrappers.getBlockState(Blocks.OAK_LEAVES.defaultBlockState());
+		final IDhApiBlockStateWrapper waterBlock = wrappers.getBlockState(Blocks.WATER.defaultBlockState());
+		final IDhApiBlockStateWrapper airBlock = wrappers.airBlock();
+		final IDhApiBiomeWrapper plainsBiome = wrappers.plainsBiome();
+		final IDhApiBiomeWrapper oceanBiome = wrappers.oceanBiome();
+		final IDhApiBiomeWrapper riverBiome = wrappers.riverBiome();
+		final List<DhApiTerrainDataPoint> columnDataPoints = new ArrayList<>(4);
+		final int rockyBareThresholdY = generator.getSeaLevel() + ULTRA_FAST_BARE_STONE_OFFSET;
+
+		for (int localZ = 0; localZ < lodSizePoints; localZ++) {
+			final int worldZ = baseZ + localZ * cellSize + cellOffset;
+			for (int localX = 0; localX < lodSizePoints; localX++) {
+				final int worldX = baseX + localX * cellSize + cellOffset;
+				final int coverClass = generator.sampleCoverClass(worldX, worldZ);
+				final WaterSurfaceResolver.WaterColumnData column =
+						generator.resolveLodWaterColumn(worldX, worldZ, coverClass);
+				final int surfaceY = Mth.clamp(column.terrainSurface(), minY, maxY - 1);
+				final int waterSurface = Mth.clamp(column.waterSurface(), minY, maxY - 1);
+				final boolean underwater = column.hasWater() && waterSurface > surfaceY;
+				final IDhApiBiomeWrapper biome = column.hasWater()
+						? (column.isOcean() ? oceanBiome : riverBiome)
+						: plainsBiome;
+				final IDhApiBlockStateWrapper topBlock = ultraFastTopBlockForCoverClass(
+						coverClass,
+						underwater,
+						surfaceY,
+						rockyBareThresholdY,
+						defaultLandTopBlock,
+						shrubTopBlock,
+						bareTopBlock,
+						stonyBareTopBlock,
+						snowTopBlock,
+						wetlandTopBlock,
+						builtTopBlock,
+						mossTopBlock,
+						underwaterTopBlock
+				);
+
+				int lastLayerTop = 0;
+				final int surfaceTop = toLayerTop(surfaceY, minY, absoluteTop);
+				final int topLayerBase = Math.max(0, surfaceTop - 1);
+				if (topLayerBase > lastLayerTop) {
+					columnDataPoints.add(
+							DhApiTerrainDataPoint.create((byte) 0, 0, SKY_LIGHT, lastLayerTop, topLayerBase, fillerBlock, biome)
+					);
+					lastLayerTop = topLayerBase;
+				}
+				if (surfaceTop > lastLayerTop) {
+					columnDataPoints.add(
+							DhApiTerrainDataPoint.create(
+									(byte) 0,
+									0,
+									SKY_LIGHT,
+									lastLayerTop,
+									surfaceTop,
+									topBlock,
+									biome
+							)
+					);
+					lastLayerTop = surfaceTop;
+				}
+
+				if (underwater) {
+					final int waterTop = toLayerTop(waterSurface, minY, absoluteTop);
+					if (waterTop > lastLayerTop) {
+						columnDataPoints.add(
+								DhApiTerrainDataPoint.create((byte) 0, 0, SKY_LIGHT, lastLayerTop, waterTop, waterBlock, biome)
+						);
+						lastLayerTop = waterTop;
+					}
+				}
+
+				if (coverClass == ESA_TREE_COVER && !underwater) {
+					final int treeHash = mixHash(worldX, worldZ, ULTRA_FAST_TREE_SALT);
+					if (hasClusterCenter(treeHash, ULTRA_FAST_TREE_CHANCE_PERCENT)) {
+						int canopyHeight = 1 + ((treeHash >>> 12) & 0x1);
+						if (((treeHash >>> 14) & 0x7) == 0) {
+							canopyHeight++;
+						}
+						final int canopyTop = Math.min(absoluteTop, lastLayerTop + canopyHeight);
+						if (canopyTop > lastLayerTop) {
+							columnDataPoints.add(
+									DhApiTerrainDataPoint.create(
+											(byte) 0,
+											0,
+											CANOPY_MAX_LIGHT,
+											lastLayerTop,
+											canopyTop,
+											fakeTreeCanopyBlock,
+											biome
+									)
+							);
+							lastLayerTop = canopyTop;
+						}
+					}
+				}
+
+				if (lastLayerTop < absoluteTop) {
+					columnDataPoints.add(
+							DhApiTerrainDataPoint.create((byte) 0, 0, SKY_LIGHT, lastLayerTop, absoluteTop, airBlock, biome)
+					);
+				}
+
+				output.setApiDataPointColumn(localX, localZ, columnDataPoints);
+				columnDataPoints.clear();
+			}
+		}
+	}
+
+	private boolean useUltraFastLodMode() {
+		return generator.settings().distantHorizonsRenderMode()
+				== EarthGeneratorSettings.DistantHorizonsRenderMode.ULTRA_FAST;
+	}
+
+	private static IDhApiBlockStateWrapper ultraFastTopBlockForCoverClass(
+			final int coverClass,
+			final boolean underwater,
+			final int surfaceY,
+			final int rockyBareThresholdY,
+			final IDhApiBlockStateWrapper defaultLandTopBlock,
+			final IDhApiBlockStateWrapper shrubTopBlock,
+			final IDhApiBlockStateWrapper bareTopBlock,
+			final IDhApiBlockStateWrapper stonyBareTopBlock,
+			final IDhApiBlockStateWrapper snowTopBlock,
+			final IDhApiBlockStateWrapper wetlandTopBlock,
+			final IDhApiBlockStateWrapper builtTopBlock,
+			final IDhApiBlockStateWrapper mossTopBlock,
+			final IDhApiBlockStateWrapper underwaterTopBlock
+	) {
+		if (underwater) {
+			if (coverClass == ESA_MANGROVES || coverClass == ESA_HERBACEOUS_WETLAND) {
+				return wetlandTopBlock;
+			}
+			return underwaterTopBlock;
+		}
+		return switch (coverClass) {
+			case ESA_TREE_COVER, ESA_GRASSLAND, ESA_CROPLAND -> defaultLandTopBlock;
+			case ESA_SHRUBLAND -> shrubTopBlock;
+			case ESA_BUILT_UP -> builtTopBlock;
+			case ESA_BARE_SPARSE -> surfaceY >= rockyBareThresholdY ? stonyBareTopBlock : bareTopBlock;
+			case ESA_SNOW_ICE -> snowTopBlock;
+			case ESA_HERBACEOUS_WETLAND, ESA_MANGROVES -> wetlandTopBlock;
+			case ESA_MOSS_LICHEN -> mossTopBlock;
+			default -> defaultLandTopBlock;
+		};
+	}
+
 	private static int toLayerTop(final int inclusiveTopY, final int minY, final int absoluteTop) {
 		return Mth.clamp(inclusiveTopY - minY + 1, 0, absoluteTop);
 	}
@@ -481,6 +697,15 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 		}
 		final int cellSize = 1 << detailLevel;
 		final int cellOffset = cellSize >> 1;
+		if (useUltraFastLodMode()) {
+			final int baseX = SectionPos.sectionToBlockCoord(chunkPosMinX);
+			final int baseZ = SectionPos.sectionToBlockCoord(chunkPosMinZ);
+			final int center = Math.max(0, lodSizePoints / 2);
+			final int centerX = baseX + center * cellSize + cellOffset;
+			final int centerZ = baseZ + center * cellSize + cellOffset;
+			prefetchAtBlock(centerX, centerZ);
+			return;
+		}
 		final boolean useDetailedWater = generator.settings().distantHorizonsWaterResolver()
 				&& detailLevel <= LOD_WATER_RESOLVER_MAX_DETAIL;
 		final int maxBlendBlocks = Math.max(
@@ -591,6 +816,18 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 
 	private static CanopyProfile canopyProfile(final Holder<Biome> biome) {
 		return CANOPY_PROFILES.computeIfAbsent(biome, TellusLodGenerator::buildCanopyProfile);
+	}
+
+	private static CanopyProfile resolveTreeCoverCanopyProfile(
+			final CanopyProfile biomeProfile,
+			final int coverClass
+	) {
+		if (coverClass == ESA_TREE_COVER
+				&& !biomeProfile.isMangrove()
+				&& biomeProfile.canopyBaseChance() <= 0) {
+			return TREE_COVER_FALLBACK_CANOPY_PROFILE;
+		}
+		return biomeProfile;
 	}
 
 	private static CanopyProfile buildCanopyProfile(final Holder<Biome> biome) {
@@ -1206,6 +1443,8 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 
 		private final IDhApiBlockStateWrapper airBlock;
 		private final IDhApiBiomeWrapper defaultBiome;
+		private final IDhApiBiomeWrapper oceanBiome;
+		private final IDhApiBiomeWrapper riverBiome;
 
 		private final Map<BlockState, IDhApiBlockStateWrapper> blockStates = new IdentityHashMap<>();
 		private final Map<Holder<Biome>, IDhApiBiomeWrapper> biomes = new HashMap<>();
@@ -1214,10 +1453,24 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 			this.levelWrapper = levelWrapper;
 			airBlock = DhApi.Delayed.wrapperFactory.getAirBlockStateWrapper();
 			defaultBiome = lookupBiomeById(Biomes.PLAINS);
+			oceanBiome = lookupBiomeById(Biomes.OCEAN);
+			riverBiome = lookupBiomeById(Biomes.RIVER);
 		}
 
 		public IDhApiBlockStateWrapper airBlock() {
 			return airBlock;
+		}
+
+		public IDhApiBiomeWrapper plainsBiome() {
+			return Objects.requireNonNull(defaultBiome, "No default biome available");
+		}
+
+		public IDhApiBiomeWrapper oceanBiome() {
+			return oceanBiome != null ? oceanBiome : plainsBiome();
+		}
+
+		public IDhApiBiomeWrapper riverBiome() {
+			return riverBiome != null ? riverBiome : plainsBiome();
 		}
 
 		public IDhApiBlockStateWrapper getBlockState(final BlockState blockState) {

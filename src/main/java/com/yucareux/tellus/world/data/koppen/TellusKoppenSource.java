@@ -32,6 +32,9 @@ public final class TellusKoppenSource {
 	private static final int SMOOTH_RADIUS_PIXELS = 2;
 	private static final double WARP_AMPLITUDE_METERS = 800.0;
 	private static final double WARP_WAVELENGTH_METERS = 12000.0;
+	private static final double DITHER_EDGE_BLEND_START = 0.72;
+	private static final int DITHER_NOISE_CELL_BLOCKS = 4;
+	private static final long DITHER_SEED = 0x51A7C6D3894F2E17L;
 	private static final long WARP_SEED_X = 0x243f6a8885a308d3L;
 	private static final long WARP_SEED_Z = 0x13198a2e03707344L;
 
@@ -80,7 +83,14 @@ public final class TellusKoppenSource {
 	}
 
 	public String sampleDitheredCode(double blockX, double blockZ, double worldScale) {
-		return sampleRawCode(blockX, blockZ, worldScale);
+		PixelSample center = toPixelSample(blockX, blockZ, worldScale);
+		if (center == null) {
+			return null;
+		}
+		if (this.raster == GeoTiffRaster.MISSING) {
+			return null;
+		}
+		return this.raster.sampleDithered(center, blockX, blockZ);
 	}
 
 	public String sampleRawCode(double blockX, double blockZ, double worldScale) {
@@ -118,6 +128,14 @@ public final class TellusKoppenSource {
 	}
 
 	private Pixel toPixel(double blockX, double blockZ, double worldScale) {
+		PixelSample sample = toPixelSample(blockX, blockZ, worldScale);
+		if (sample == null) {
+			return null;
+		}
+		return new Pixel(sample.x(), sample.y());
+	}
+
+	private PixelSample toPixelSample(double blockX, double blockZ, double worldScale) {
 		if (worldScale <= 0.0) {
 			return null;
 		}
@@ -136,7 +154,7 @@ public final class TellusKoppenSource {
 		if (lat < MIN_LAT || lat > MAX_LAT || lon < MIN_LON || lon > MAX_LON) {
 			return null;
 		}
-		return this.raster.toPixel(lon, lat);
+		return this.raster.toPixelSample(lon, lat);
 	}
 
 	private static int downsampleStep(double worldScale, double resolutionMeters) {
@@ -237,6 +255,9 @@ public final class TellusKoppenSource {
 	}
 
 	private record Pixel(int x, int y) {
+	}
+
+	private record PixelSample(int x, int y, double fracX, double fracY) {
 	}
 
 	private record WarpedCoords(double x, double z) {
@@ -346,16 +367,20 @@ public final class TellusKoppenSource {
 			}
 		}
 
-		Pixel toPixel(double lon, double lat) {
+		PixelSample toPixelSample(double lon, double lat) {
 			if (this == MISSING) {
 				return null;
 			}
-			int pixelX = (int) Math.floor((lon - this.tieLon) / this.pixelScaleX);
-			int pixelY = (int) Math.floor((this.tieLat - lat) / this.pixelScaleY);
+			double pixelXCoord = (lon - this.tieLon) / this.pixelScaleX;
+			double pixelYCoord = (this.tieLat - lat) / this.pixelScaleY;
+			int pixelX = (int) Math.floor(pixelXCoord);
+			int pixelY = (int) Math.floor(pixelYCoord);
 			if (pixelX < 0 || pixelY < 0 || pixelX >= this.width || pixelY >= this.height) {
 				return null;
 			}
-			return new Pixel(pixelX, pixelY);
+			double fracX = Mth.clamp(pixelXCoord - pixelX, 0.0, 0.999999);
+			double fracY = Mth.clamp(pixelYCoord - pixelY, 0.0, 0.999999);
+			return new PixelSample(pixelX, pixelY, fracX, fracY);
 		}
 
 		String sampleSmoothed(Pixel center, int radius) {
@@ -392,6 +417,52 @@ public final class TellusKoppenSource {
 				return null;
 			}
 			return KOPPEN_CODES[bestIndex];
+		}
+
+		String sampleDithered(PixelSample center, double blockX, double blockZ) {
+			if (center == null) {
+				return null;
+			}
+			int centerValue = sampleValue(center.x, center.y);
+			if (centerValue <= 0 || centerValue >= KOPPEN_CODES.length) {
+				return null;
+			}
+
+			double[] candidateInfluence = new double[KOPPEN_CODES.length];
+			addCandidateInfluence(candidateInfluence, sampleValue(center.x - 1, center.y), centerValue, 1.0 - center.fracX);
+			addCandidateInfluence(candidateInfluence, sampleValue(center.x + 1, center.y), centerValue, center.fracX);
+			addCandidateInfluence(candidateInfluence, sampleValue(center.x, center.y - 1), centerValue, 1.0 - center.fracY);
+			addCandidateInfluence(candidateInfluence, sampleValue(center.x, center.y + 1), centerValue, center.fracY);
+
+			int bestAlt = 0;
+			double bestInfluence = 0.0;
+			for (int i = 1; i < candidateInfluence.length; i++) {
+				double influence = candidateInfluence[i];
+				if (influence > bestInfluence) {
+					bestInfluence = influence;
+					bestAlt = i;
+				}
+			}
+			if (bestAlt <= 0) {
+				return KOPPEN_CODES[centerValue];
+			}
+
+			double blendChance = Mth.clamp(
+					(bestInfluence - DITHER_EDGE_BLEND_START) / (1.0 - DITHER_EDGE_BLEND_START),
+					0.0,
+					1.0
+			);
+			if (blendChance <= 0.0) {
+				return KOPPEN_CODES[centerValue];
+			}
+
+			int noiseX = Math.floorDiv(Mth.floor(blockX), DITHER_NOISE_CELL_BLOCKS);
+			int noiseZ = Math.floorDiv(Mth.floor(blockZ), DITHER_NOISE_CELL_BLOCKS);
+			double pick = hashToUnit(noiseX, noiseZ, DITHER_SEED);
+			if (pick < blendChance) {
+				return KOPPEN_CODES[bestAlt];
+			}
+			return KOPPEN_CODES[centerValue];
 		}
 
 		String findNearest(Pixel center, int radius) {
@@ -440,6 +511,24 @@ public final class TellusKoppenSource {
 				return null;
 			}
 			return KOPPEN_CODES[value];
+		}
+
+		private static void addCandidateInfluence(
+				double[] candidateInfluence,
+				int candidateValue,
+				int centerValue,
+				double influence
+		) {
+			if (candidateValue <= 0 || candidateValue >= candidateInfluence.length) {
+				return;
+			}
+			if (candidateValue == centerValue) {
+				return;
+			}
+			if (influence <= 0.0) {
+				return;
+			}
+			candidateInfluence[candidateValue] = Math.max(candidateInfluence[candidateValue], influence);
 		}
 
 		private int sampleValue(int pixelX, int pixelY) {

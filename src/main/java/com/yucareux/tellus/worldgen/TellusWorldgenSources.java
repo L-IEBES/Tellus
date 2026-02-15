@@ -77,7 +77,13 @@ final class TellusWorldgenSources {
 			submitPrefetch(() -> LAND_COVER.prefetchTiles(centerX, centerZ, worldScale, LAND_COVER_PREFETCH_RADIUS));
 		}
 		if (ELEVATION_PREFETCH_RADIUS > 0) {
-			submitPrefetch(() -> ELEVATION.prefetchTiles(centerX, centerZ, worldScale, ELEVATION_PREFETCH_RADIUS));
+			submitPrefetch(() -> ELEVATION.prefetchTiles(
+					centerX,
+					centerZ,
+					worldScale,
+					ELEVATION_PREFETCH_RADIUS,
+					settings.demProvider()
+			));
 		}
 		if (LAND_MASK_PREFETCH_RADIUS > 0) {
 			submitPrefetch(() -> LAND_MASK.prefetchTiles(centerX, centerZ, worldScale, LAND_MASK_PREFETCH_RADIUS));

@@ -54,7 +54,11 @@ public record EarthGeneratorSettings(
 		boolean realtimeTime,
 		boolean realtimeWeather,
 		boolean historicalSnow,
-		DistantHorizonsRenderMode distantHorizonsRenderMode
+		boolean voxyChunkPregenEnabled,
+		int voxyChunkPregenMaxRadius,
+		int voxyChunkPregenChunksPerTick,
+		DistantHorizonsRenderMode distantHorizonsRenderMode,
+		DemProvider demProvider
 ) {
 	public static final double DEFAULT_SPAWN_LATITUDE = 27.9881;
 	public static final double DEFAULT_SPAWN_LONGITUDE = 86.9250;
@@ -70,9 +74,13 @@ public record EarthGeneratorSettings(
 	private static final double EVEREST_ELEVATION_METERS = 8848.0;
 	private static final double MARIANA_TRENCH_METERS = -11034.0;
 	private static final double MAX_WORLD_SCALE = 1000.0;
+	private static final int MAX_VOXY_PREGEN_RADIUS = 1024;
+	private static final int MAX_VOXY_PREGEN_CHUNKS_PER_TICK = 200;
 
 	public EarthGeneratorSettings {
 		worldScale = clampWorldScale(worldScale);
+		voxyChunkPregenMaxRadius = Mth.clamp(voxyChunkPregenMaxRadius, 0, MAX_VOXY_PREGEN_RADIUS);
+		voxyChunkPregenChunksPerTick = Mth.clamp(voxyChunkPregenChunksPerTick, 1, MAX_VOXY_PREGEN_CHUNKS_PER_TICK);
 	}
 
 	public static final EarthGeneratorSettings DEFAULT = new EarthGeneratorSettings(
@@ -114,7 +122,11 @@ public record EarthGeneratorSettings(
 			false,
 			false,
 			false,
-			DistantHorizonsRenderMode.FAST
+			false,
+			96,
+			4,
+			DistantHorizonsRenderMode.FAST,
+			DemProvider.TERRARIUM
 	);
 
 	private static final MapCodec<BaseToggles> BASE_TOGGLES_CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
@@ -176,6 +188,10 @@ public record EarthGeneratorSettings(
 			DistantHorizonsRenderMode.CODEC.fieldOf("distant_horizons_render_mode")
 					.orElse(DEFAULT.distantHorizonsRenderMode());
 
+	private static final MapCodec<DemProvider> DEM_PROVIDER_CODEC =
+			DemProvider.CODEC.fieldOf("dem_provider")
+					.orElse(DEFAULT.demProvider());
+
 	private static final MapCodec<Boolean> DISTANT_HORIZONS_WATER_RESOLVER_CODEC =
 			Codec.BOOL.fieldOf("distant_horizons_water_resolver").orElse(DEFAULT.distantHorizonsWaterResolver());
 
@@ -187,6 +203,19 @@ public record EarthGeneratorSettings(
 
 	private static final MapCodec<Boolean> HISTORICAL_SNOW_CODEC =
 			Codec.BOOL.fieldOf("historical_snow").orElse(DEFAULT.historicalSnow());
+
+	private static final MapCodec<Boolean> VOXY_CHUNK_PREGEN_ENABLED_CODEC =
+			Codec.BOOL.fieldOf("voxy_chunk_pregen_enabled").orElse(DEFAULT.voxyChunkPregenEnabled());
+
+	private static final MapCodec<Integer> VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC =
+			Codec.intRange(0, MAX_VOXY_PREGEN_RADIUS)
+					.fieldOf("voxy_chunk_pregen_max_radius")
+					.orElse(DEFAULT.voxyChunkPregenMaxRadius());
+
+	private static final MapCodec<Integer> VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC =
+			Codec.intRange(1, MAX_VOXY_PREGEN_CHUNKS_PER_TICK)
+					.fieldOf("voxy_chunk_pregen_chunks_per_tick")
+					.orElse(DEFAULT.voxyChunkPregenChunksPerTick());
 
 	private static final MapCodec<Boolean> DEEP_DARK_CODEC =
 			Codec.BOOL.fieldOf("deep_dark").orElse(DEFAULT.deepDark());
@@ -226,10 +255,14 @@ public record EarthGeneratorSettings(
 							: Optional.of(input.seaLevel());
 					builder = SEA_LEVEL_CODEC.encode(seaLevel, ops, builder);
 					builder = DISTANT_HORIZONS_RENDER_MODE_CODEC.encode(input.distantHorizonsRenderMode(), ops, builder);
+					builder = DEM_PROVIDER_CODEC.encode(input.demProvider(), ops, builder);
 					builder = DISTANT_HORIZONS_WATER_RESOLVER_CODEC.encode(input.distantHorizonsWaterResolver(), ops, builder);
 					builder = REALTIME_TIME_CODEC.encode(input.realtimeTime(), ops, builder);
 					builder = REALTIME_WEATHER_CODEC.encode(input.realtimeWeather(), ops, builder);
 					builder = HISTORICAL_SNOW_CODEC.encode(input.historicalSnow(), ops, builder);
+					builder = VOXY_CHUNK_PREGEN_ENABLED_CODEC.encode(input.voxyChunkPregenEnabled(), ops, builder);
+					builder = VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.encode(input.voxyChunkPregenMaxRadius(), ops, builder);
+					builder = VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.encode(input.voxyChunkPregenChunksPerTick(), ops, builder);
 					builder = DEEP_DARK_CODEC.encode(input.deepDark(), ops, builder);
 					builder = GEODES_CODEC.encode(input.geodes(), ops, builder);
 					builder = STRUCTURE_CODEC.encode(StructureSettings.fromSettings(input), ops, builder);
@@ -240,13 +273,17 @@ public record EarthGeneratorSettings(
 				public <T> Stream<T> keys(DynamicOps<T> ops) {
 					Stream<T> baseKeys = Stream.concat(BASE_CODEC.keys(ops), SEA_LEVEL_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, DISTANT_HORIZONS_RENDER_MODE_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, DISTANT_HORIZONS_WATER_RESOLVER_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, REALTIME_TIME_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, REALTIME_WEATHER_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, HISTORICAL_SNOW_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, DEEP_DARK_CODEC.keys(ops));
-					baseKeys = Stream.concat(baseKeys, GEODES_CODEC.keys(ops));
-					Stream<T> structureKeys = Stream.concat(baseKeys, STRUCTURE_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, DEM_PROVIDER_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, DISTANT_HORIZONS_WATER_RESOLVER_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, REALTIME_TIME_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, REALTIME_WEATHER_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, HISTORICAL_SNOW_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, DEEP_DARK_CODEC.keys(ops));
+						baseKeys = Stream.concat(baseKeys, GEODES_CODEC.keys(ops));
+						Stream<T> structureKeys = Stream.concat(baseKeys, STRUCTURE_CODEC.keys(ops));
 					return Stream.concat(structureKeys, TRAIL_RUINS_CODEC.keys(ops));
 				}
 			},
@@ -257,11 +294,15 @@ public record EarthGeneratorSettings(
 					DataResult<Optional<Integer>> seaLevel = SEA_LEVEL_CODEC.decode(ops, input);
 					DataResult<DistantHorizonsRenderMode> distantHorizonsRenderMode =
 							DISTANT_HORIZONS_RENDER_MODE_CODEC.decode(ops, input);
+					DataResult<DemProvider> demProvider = DEM_PROVIDER_CODEC.decode(ops, input);
 					DataResult<Boolean> distantHorizonsWaterResolver =
 							DISTANT_HORIZONS_WATER_RESOLVER_CODEC.decode(ops, input);
 					DataResult<Boolean> realtimeTime = REALTIME_TIME_CODEC.decode(ops, input);
 					DataResult<Boolean> realtimeWeather = REALTIME_WEATHER_CODEC.decode(ops, input);
 					DataResult<Boolean> historicalSnow = HISTORICAL_SNOW_CODEC.decode(ops, input);
+					DataResult<Boolean> voxyChunkPregenEnabled = VOXY_CHUNK_PREGEN_ENABLED_CODEC.decode(ops, input);
+					DataResult<Integer> voxyChunkPregenMaxRadius = VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.decode(ops, input);
+					DataResult<Integer> voxyChunkPregenChunksPerTick = VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.decode(ops, input);
 					DataResult<Boolean> deepDark = DEEP_DARK_CODEC.decode(ops, input);
 					DataResult<Boolean> geodes = GEODES_CODEC.decode(ops, input);
 					DataResult<StructureSettings> structures = STRUCTURE_CODEC.decode(ops, input);
@@ -271,7 +312,11 @@ public record EarthGeneratorSettings(
 							EarthGeneratorSettings::applyDistantHorizonsRenderMode,
 							distantHorizonsRenderMode
 					);
-					DataResult<SettingsBase> withWaterResolver = withRenderMode.apply2(
+					DataResult<SettingsBase> withDemProvider = withRenderMode.apply2(
+							EarthGeneratorSettings::applyDemProvider,
+							demProvider
+					);
+					DataResult<SettingsBase> withWaterResolver = withDemProvider.apply2(
 							EarthGeneratorSettings::applyDistantHorizonsWaterResolver,
 							distantHorizonsWaterResolver
 					);
@@ -287,7 +332,19 @@ public record EarthGeneratorSettings(
 							EarthGeneratorSettings::applyHistoricalSnow,
 							historicalSnow
 					);
-					DataResult<EarthGeneratorSettings> settings = withHistoricalSnow.map(SettingsBase::toSettings);
+					DataResult<SettingsBase> withVoxyEnabled = withHistoricalSnow.apply2(
+							EarthGeneratorSettings::applyVoxyChunkPregenEnabled,
+							voxyChunkPregenEnabled
+					);
+					DataResult<SettingsBase> withVoxyMaxRadius = withVoxyEnabled.apply2(
+							EarthGeneratorSettings::applyVoxyChunkPregenMaxRadius,
+							voxyChunkPregenMaxRadius
+					);
+					DataResult<SettingsBase> withVoxyChunksPerTick = withVoxyMaxRadius.apply2(
+							EarthGeneratorSettings::applyVoxyChunkPregenChunksPerTick,
+							voxyChunkPregenChunksPerTick
+					);
+					DataResult<EarthGeneratorSettings> settings = withVoxyChunksPerTick.map(SettingsBase::toSettings);
 					settings = settings.apply2(EarthGeneratorSettings::applyDeepDark, deepDark);
 					settings = settings.apply2(EarthGeneratorSettings::applyGeodes, geodes);
 					settings = settings.apply2(EarthGeneratorSettings::withStructureSettings, structures);
@@ -298,10 +355,14 @@ public record EarthGeneratorSettings(
 				public <T> Stream<T> keys(DynamicOps<T> ops) {
 					Stream<T> baseKeys = Stream.concat(BASE_CODEC.keys(ops), SEA_LEVEL_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, DISTANT_HORIZONS_RENDER_MODE_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, DEM_PROVIDER_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, DISTANT_HORIZONS_WATER_RESOLVER_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, REALTIME_TIME_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, REALTIME_WEATHER_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, HISTORICAL_SNOW_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.keys(ops));
+					baseKeys = Stream.concat(baseKeys, VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, DEEP_DARK_CODEC.keys(ops));
 					baseKeys = Stream.concat(baseKeys, GEODES_CODEC.keys(ops));
 					Stream<T> structureKeys = Stream.concat(baseKeys, STRUCTURE_CODEC.keys(ops));
@@ -399,8 +460,12 @@ public record EarthGeneratorSettings(
 				DEFAULT.distantHorizonsWaterResolver(),
 				DEFAULT.realtimeTime(),
 				DEFAULT.realtimeWeather(),
-					DEFAULT.historicalSnow(),
-					DEFAULT.distantHorizonsRenderMode()
+				DEFAULT.historicalSnow(),
+				DEFAULT.voxyChunkPregenEnabled(),
+				DEFAULT.voxyChunkPregenMaxRadius(),
+				DEFAULT.voxyChunkPregenChunksPerTick(),
+				DEFAULT.distantHorizonsRenderMode(),
+				DEFAULT.demProvider()
 			);
 	}
 
@@ -473,7 +538,11 @@ public record EarthGeneratorSettings(
 			boolean realtimeTime,
 			boolean realtimeWeather,
 			boolean historicalSnow,
-			DistantHorizonsRenderMode distantHorizonsRenderMode
+			boolean voxyChunkPregenEnabled,
+			int voxyChunkPregenMaxRadius,
+			int voxyChunkPregenChunksPerTick,
+			DistantHorizonsRenderMode distantHorizonsRenderMode,
+			DemProvider demProvider
 	) {
 		private static SettingsBase fromSettings(EarthGeneratorSettings settings) {
 			return new SettingsBase(
@@ -496,7 +565,11 @@ public record EarthGeneratorSettings(
 					settings.realtimeTime(),
 					settings.realtimeWeather(),
 					settings.historicalSnow(),
-					settings.distantHorizonsRenderMode()
+					settings.voxyChunkPregenEnabled(),
+					settings.voxyChunkPregenMaxRadius(),
+					settings.voxyChunkPregenChunksPerTick(),
+					settings.distantHorizonsRenderMode(),
+					settings.demProvider()
 			);
 		}
 
@@ -521,7 +594,11 @@ public record EarthGeneratorSettings(
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
 			);
 		}
 
@@ -546,7 +623,11 @@ public record EarthGeneratorSettings(
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
 			);
 		}
 
@@ -571,7 +652,11 @@ public record EarthGeneratorSettings(
 					enabled,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
 			);
 		}
 
@@ -596,7 +681,11 @@ public record EarthGeneratorSettings(
 					this.realtimeTime,
 					enabled,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
 			);
 		}
 
@@ -621,7 +710,98 @@ public record EarthGeneratorSettings(
 					this.realtimeTime,
 					this.realtimeWeather,
 					enabled,
-					this.distantHorizonsRenderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
+
+		private SettingsBase withVoxyChunkPregenEnabled(boolean enabled) {
+			return new SettingsBase(
+					this.worldScale,
+					this.terrestrialHeightScale,
+					this.oceanicHeightScale,
+					this.heightOffset,
+					this.seaLevel,
+					this.spawnLatitude,
+					this.spawnLongitude,
+					this.minAltitude,
+					this.maxAltitude,
+					this.riverLakeShorelineBlend,
+					this.oceanShorelineBlend,
+					this.shorelineBlendCliffLimit,
+					this.caveGeneration,
+					this.oreDistribution,
+					this.lavaPools,
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					enabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
+
+		private SettingsBase withVoxyChunkPregenMaxRadius(int maxRadius) {
+			return new SettingsBase(
+					this.worldScale,
+					this.terrestrialHeightScale,
+					this.oceanicHeightScale,
+					this.heightOffset,
+					this.seaLevel,
+					this.spawnLatitude,
+					this.spawnLongitude,
+					this.minAltitude,
+					this.maxAltitude,
+					this.riverLakeShorelineBlend,
+					this.oceanShorelineBlend,
+					this.shorelineBlendCliffLimit,
+					this.caveGeneration,
+					this.oreDistribution,
+					this.lavaPools,
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					maxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
+
+		private SettingsBase withVoxyChunkPregenChunksPerTick(int chunksPerTick) {
+			return new SettingsBase(
+					this.worldScale,
+					this.terrestrialHeightScale,
+					this.oceanicHeightScale,
+					this.heightOffset,
+					this.seaLevel,
+					this.spawnLatitude,
+					this.spawnLongitude,
+					this.minAltitude,
+					this.maxAltitude,
+					this.riverLakeShorelineBlend,
+					this.oceanShorelineBlend,
+					this.shorelineBlendCliffLimit,
+					this.caveGeneration,
+					this.oreDistribution,
+					this.lavaPools,
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					chunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
 			);
 		}
 
@@ -646,7 +826,40 @@ public record EarthGeneratorSettings(
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					renderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					renderMode,
+					this.demProvider
+			);
+		}
+
+		private SettingsBase withDemProvider(DemProvider demProvider) {
+			return new SettingsBase(
+					this.worldScale,
+					this.terrestrialHeightScale,
+					this.oceanicHeightScale,
+					this.heightOffset,
+					this.seaLevel,
+					this.spawnLatitude,
+					this.spawnLongitude,
+					this.minAltitude,
+					this.maxAltitude,
+					this.riverLakeShorelineBlend,
+					this.oceanShorelineBlend,
+					this.shorelineBlendCliffLimit,
+					this.caveGeneration,
+					this.oreDistribution,
+					this.lavaPools,
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					Objects.requireNonNull(demProvider, "demProvider")
 			);
 		}
 
@@ -690,7 +903,11 @@ public record EarthGeneratorSettings(
 					this.realtimeTime,
 					this.realtimeWeather,
 					this.historicalSnow,
-					this.distantHorizonsRenderMode
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
 			);
 		}
 	}
@@ -714,6 +931,10 @@ public record EarthGeneratorSettings(
 		return settings.withDistantHorizonsRenderMode(Objects.requireNonNull(renderMode, "renderMode"));
 	}
 
+	private static SettingsBase applyDemProvider(SettingsBase settings, DemProvider demProvider) {
+		return settings.withDemProvider(Objects.requireNonNull(demProvider, "demProvider"));
+	}
+
 	private static SettingsBase applyDistantHorizonsWaterResolver(SettingsBase settings, Boolean enabled) {
 		return settings.withDistantHorizonsWaterResolver(Objects.requireNonNull(enabled, "distantHorizonsWaterResolver").booleanValue());
 	}
@@ -728,6 +949,18 @@ public record EarthGeneratorSettings(
 
 	private static SettingsBase applyHistoricalSnow(SettingsBase settings, Boolean enabled) {
 		return settings.withHistoricalSnow(Objects.requireNonNull(enabled, "historicalSnow").booleanValue());
+	}
+
+	private static SettingsBase applyVoxyChunkPregenEnabled(SettingsBase settings, Boolean enabled) {
+		return settings.withVoxyChunkPregenEnabled(Objects.requireNonNull(enabled, "voxyChunkPregenEnabled").booleanValue());
+	}
+
+	private static SettingsBase applyVoxyChunkPregenMaxRadius(SettingsBase settings, Integer maxRadius) {
+		return settings.withVoxyChunkPregenMaxRadius(Objects.requireNonNull(maxRadius, "voxyChunkPregenMaxRadius").intValue());
+	}
+
+	private static SettingsBase applyVoxyChunkPregenChunksPerTick(SettingsBase settings, Integer chunksPerTick) {
+		return settings.withVoxyChunkPregenChunksPerTick(Objects.requireNonNull(chunksPerTick, "voxyChunkPregenChunksPerTick").intValue());
 	}
 
 	private record StructureSettings(
@@ -806,13 +1039,17 @@ public record EarthGeneratorSettings(
 				this.addTrailRuins,
 				this.deepDark,
 				this.geodes,
-				this.distantHorizonsWaterResolver,
-				this.realtimeTime,
-				this.realtimeWeather,
-				this.historicalSnow,
-				this.distantHorizonsRenderMode
-		);
-	}
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
 
 	private static EarthGeneratorSettings applyTrailRuins(EarthGeneratorSettings settings, Boolean addTrailRuins) {
 		return settings.withTrailRuins(Objects.requireNonNull(addTrailRuins, "addTrailRuins").booleanValue());
@@ -862,13 +1099,17 @@ public record EarthGeneratorSettings(
 				addTrailRuins,
 				this.deepDark,
 				this.geodes,
-				this.distantHorizonsWaterResolver,
-				this.realtimeTime,
-				this.realtimeWeather,
-				this.historicalSnow,
-				this.distantHorizonsRenderMode
-		);
-	}
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
 
 	private EarthGeneratorSettings withDeepDark(boolean deepDark) {
 		return new EarthGeneratorSettings(
@@ -906,13 +1147,17 @@ public record EarthGeneratorSettings(
 				this.addTrailRuins,
 				deepDark,
 				this.geodes,
-				this.distantHorizonsWaterResolver,
-				this.realtimeTime,
-				this.realtimeWeather,
-				this.historicalSnow,
-				this.distantHorizonsRenderMode
-		);
-	}
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
 
 	private EarthGeneratorSettings withGeodes(boolean geodes) {
 		return new EarthGeneratorSettings(
@@ -950,16 +1195,21 @@ public record EarthGeneratorSettings(
 				this.addTrailRuins,
 				this.deepDark,
 				geodes,
-				this.distantHorizonsWaterResolver,
-				this.realtimeTime,
-				this.realtimeWeather,
-				this.historicalSnow,
-				this.distantHorizonsRenderMode
-		);
-	}
+					this.distantHorizonsWaterResolver,
+					this.realtimeTime,
+					this.realtimeWeather,
+					this.historicalSnow,
+					this.voxyChunkPregenEnabled,
+					this.voxyChunkPregenMaxRadius,
+					this.voxyChunkPregenChunksPerTick,
+					this.distantHorizonsRenderMode,
+					this.demProvider
+			);
+		}
 
 	public enum DistantHorizonsRenderMode {
 		FAST("fast"),
+		ULTRA_FAST("ultra_fast"),
 		DETAILED("detailed");
 
 		public static final Codec<DistantHorizonsRenderMode> CODEC = Codec.STRING.xmap(
@@ -987,6 +1237,38 @@ public record EarthGeneratorSettings(
 				}
 			}
 			return FAST;
+		}
+	}
+
+	public enum DemProvider {
+		TERRARIUM("terrarium"),
+		ARCTICDEM("arcticdem");
+
+		public static final Codec<DemProvider> CODEC = Codec.STRING.xmap(
+				DemProvider::fromId,
+				DemProvider::id
+		);
+
+		private final String id;
+
+		DemProvider(String id) {
+			this.id = Objects.requireNonNull(id, "id");
+		}
+
+		public String id() {
+			return this.id;
+		}
+
+		public static DemProvider fromId(String id) {
+			if (id == null) {
+				return TERRARIUM;
+			}
+			for (DemProvider provider : values()) {
+				if (provider.id.equalsIgnoreCase(id)) {
+					return provider;
+				}
+			}
+			return TERRARIUM;
 		}
 	}
 

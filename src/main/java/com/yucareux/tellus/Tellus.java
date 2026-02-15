@@ -5,9 +5,11 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.brigadier.arguments.BoolArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
 import com.yucareux.tellus.integration.distant_horizons.DistantHorizonsIntegration;
+import com.yucareux.tellus.integration.voxy.TellusVoxyPregenManager;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
@@ -94,6 +96,7 @@ public class Tellus implements ModInitializer {
 	);
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final TellusRealtimeManager REALTIME_MANAGER = new TellusRealtimeManager();
+	private static final TellusVoxyPregenManager VOXY_PREGEN_MANAGER = new TellusVoxyPregenManager();
 
 	// This logger is used to write text to the console and the log file.
 	// It is considered best practice to use your mod id as the logger's name.
@@ -129,11 +132,11 @@ public class Tellus implements ModInitializer {
 							.executes(context -> openGeoTpMap(context.getSource())))
 					.then(Commands.literal("weather")
 							.executes(context -> showTellusWeather(context.getSource())))
-					.then(Commands.literal("config")
-							.requires(source -> source.permissions()
-									.hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
-							.then(Commands.literal("weather")
-									.then(Commands.literal("enable_realtime_time")
+						.then(Commands.literal("config")
+								.requires(source -> source.permissions()
+										.hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+								.then(Commands.literal("weather")
+										.then(Commands.literal("enable_realtime_time")
 											.then(Commands.argument(
 													"enabled",
 													Objects.requireNonNull(BoolArgumentType.bool(), "enabledArgument")
@@ -147,13 +150,46 @@ public class Tellus implements ModInitializer {
 													"enabled",
 													Objects.requireNonNull(BoolArgumentType.bool(), "enabledArgument")
 											)
-													.executes(context -> setRealtimeWeatherOverride(
-															context.getSource(),
-															BoolArgumentType.getBool(context, "enabled")
-													))))
-							)
-					));
-		});
+														.executes(context -> setRealtimeWeatherOverride(
+																context.getSource(),
+																BoolArgumentType.getBool(context, "enabled")
+														))))
+								)
+								.then(Commands.literal("voxy")
+										.then(Commands.literal("status")
+												.executes(context -> showVoxyPregenStatus(context.getSource())))
+										.then(Commands.literal("enable_pregen")
+												.then(Commands.argument(
+														"enabled",
+														Objects.requireNonNull(BoolArgumentType.bool(), "enabledArgument")
+												)
+														.executes(context -> setVoxyPregenEnabledOverride(
+																context.getSource(),
+																BoolArgumentType.getBool(context, "enabled")
+														))))
+										.then(Commands.literal("max_radius")
+												.then(Commands.argument(
+														"chunks",
+														Objects.requireNonNull(IntegerArgumentType.integer(0, 1024), "maxRadiusArgument")
+												)
+														.executes(context -> setVoxyPregenMaxRadiusOverride(
+																context.getSource(),
+																IntegerArgumentType.getInteger(context, "chunks")
+														))))
+										.then(Commands.literal("chunks_per_tick")
+												.then(Commands.argument(
+														"value",
+														Objects.requireNonNull(IntegerArgumentType.integer(1, 200), "chunksPerTickArgument")
+												)
+														.executes(context -> setVoxyPregenChunksPerTickOverride(
+																context.getSource(),
+																IntegerArgumentType.getInteger(context, "value")
+														))))
+										.then(Commands.literal("reset")
+												.executes(context -> resetVoxyPregenOverrides(context.getSource())))
+								)
+						));
+			});
 
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			server.execute(() -> {
@@ -170,8 +206,12 @@ public class Tellus implements ModInitializer {
 				}
 			});
 		});
-		ServerLifecycleEvents.SERVER_STOPPING.register(server -> REALTIME_MANAGER.shutdown());
+		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+			REALTIME_MANAGER.shutdown();
+			VOXY_PREGEN_MANAGER.shutdown();
+		});
 		ServerTickEvents.END_SERVER_TICK.register(REALTIME_MANAGER::onServerTick);
+		ServerTickEvents.END_SERVER_TICK.register(VOXY_PREGEN_MANAGER::onServerTick);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
 				REALTIME_MANAGER.onPlayerJoin(server, handler.getPlayer()));
 
@@ -318,6 +358,89 @@ public class Tellus implements ModInitializer {
 		}
 		REALTIME_MANAGER.setRealtimeWeatherOverride(enabled);
 		source.sendSuccess(() -> Component.literal("Tellus: real-time weather set to " + enabled + "."), false);
+		return 1;
+	}
+
+	private static int setVoxyPregenEnabledOverride(CommandSourceStack source, boolean enabled) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+			return 0;
+		}
+		VOXY_PREGEN_MANAGER.setEnabledOverride(enabled);
+		source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen enabled override set to " + enabled + "."), false);
+		return 1;
+	}
+
+	private static int setVoxyPregenMaxRadiusOverride(CommandSourceStack source, int chunks) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+			return 0;
+		}
+		VOXY_PREGEN_MANAGER.setMaxRadiusOverride(chunks);
+		source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen max radius override set to " + chunks + " chunks."), false);
+		return 1;
+	}
+
+	private static int setVoxyPregenChunksPerTickOverride(CommandSourceStack source, int chunksPerTick) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+			return 0;
+		}
+		VOXY_PREGEN_MANAGER.setChunksPerTickOverride(chunksPerTick);
+		source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen budget override set to " + chunksPerTick + " chunks/tick."), false);
+		return 1;
+	}
+
+	private static int resetVoxyPregenOverrides(CommandSourceStack source) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+			return 0;
+		}
+		VOXY_PREGEN_MANAGER.clearOverrides();
+		source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen overrides reset to world settings."), false);
+		return 1;
+	}
+
+	private static int showVoxyPregenStatus(CommandSourceStack source) {
+		EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
+		if (earthGenerator == null) {
+			source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+			return 0;
+		}
+		EarthGeneratorSettings settings = earthGenerator.settings();
+		boolean enabled = VOXY_PREGEN_MANAGER.effectiveEnabled(settings);
+		int maxRadius = VOXY_PREGEN_MANAGER.effectiveMaxRadius(settings);
+		int chunksPerTick = VOXY_PREGEN_MANAGER.effectiveChunksPerTick(settings);
+
+		source.sendSuccess(() -> Component.literal("Tellus Voxy pregen")
+				.withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
+		source.sendSuccess(() -> Component.literal(
+				"Enabled: " + enabled
+						+ " (world=" + settings.voxyChunkPregenEnabled()
+						+ ", override=" + VOXY_PREGEN_MANAGER.enabledOverride() + ")"
+		).withStyle(ChatFormatting.GRAY), false);
+		source.sendSuccess(() -> Component.literal(
+				"Max radius: " + maxRadius
+						+ " chunks (world=" + settings.voxyChunkPregenMaxRadius()
+						+ ", override=" + VOXY_PREGEN_MANAGER.maxRadiusOverride() + ")"
+		).withStyle(ChatFormatting.GRAY), false);
+		source.sendSuccess(() -> Component.literal(
+				"Budget: " + chunksPerTick
+						+ " chunks/tick (world=" + settings.voxyChunkPregenChunksPerTick()
+						+ ", override=" + VOXY_PREGEN_MANAGER.chunksPerTickOverride() + ")"
+		).withStyle(ChatFormatting.GRAY), false);
+		source.sendSuccess(() -> Component.literal(
+				"Voxy radius: configured=" + VOXY_PREGEN_MANAGER.lastConfiguredVoxyRadiusChunks()
+						+ " chunks, effective=" + VOXY_PREGEN_MANAGER.lastEffectiveRadiusChunks() + " chunks"
+		).withStyle(ChatFormatting.DARK_AQUA), false);
+		source.sendSuccess(() -> Component.literal(
+				"Queue: queued=" + VOXY_PREGEN_MANAGER.queuedChunkCount()
+						+ ", in-flight=" + VOXY_PREGEN_MANAGER.inFlightChunkCount()
+		).withStyle(ChatFormatting.DARK_AQUA), false);
 		return 1;
 	}
 

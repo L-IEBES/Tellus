@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -30,9 +31,13 @@ public final class TellusElevationSource {
 	private static final double RESOLUTION_METERS = 30.0;
 	private static final String ENDPOINT = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium";
 	private static final int MAX_CACHE_TILES = intProperty("tellus.elevation.cacheTiles", 512);
+	private static final boolean DEBUG_DEM = Boolean.getBoolean("tellus.debug.dem");
+	private static final ShortRaster MISSING_RASTER = ShortRaster.create(1, 1);
 
 	private final Path cacheRoot;
 	private final LoadingCache<@NonNull TileKey, ShortRaster> cache;
+	private final ArcticDemElevationSource arcticDem = new ArcticDemElevationSource();
+	private volatile EarthGeneratorSettings.DemProvider lastLoggedProvider;
 
 	public TellusElevationSource() {
 		this.cacheRoot = FabricLoader.getInstance().getGameDir().resolve("tellus/cache/elevation-tellus");
@@ -47,12 +52,44 @@ public final class TellusElevationSource {
 	}
 
 	public double sampleElevationMeters(double blockX, double blockZ, double worldScale) {
-		return sampleElevationMeters(blockX, blockZ, worldScale, true);
+		return sampleElevationMeters(
+				blockX,
+				blockZ,
+				worldScale,
+				true,
+				EarthGeneratorSettings.DEFAULT.demProvider()
+		);
 	}
 
 	public double sampleElevationMeters(double blockX, double blockZ, double worldScale, boolean highResOcean) {
+		return sampleElevationMeters(
+				blockX,
+				blockZ,
+				worldScale,
+				highResOcean,
+				EarthGeneratorSettings.DEFAULT.demProvider()
+		);
+	}
+
+	public double sampleElevationMeters(
+			double blockX,
+			double blockZ,
+			double worldScale,
+			boolean highResOcean,
+			EarthGeneratorSettings.DemProvider demProvider
+	) {
 		if (worldScale <= 0.0) {
 			return 0.0;
+		}
+		if (DEBUG_DEM && demProvider != this.lastLoggedProvider) {
+			this.lastLoggedProvider = demProvider;
+			Tellus.LOGGER.info("DEM provider set to {}.", demProvider.id());
+		}
+		if (demProvider == EarthGeneratorSettings.DemProvider.ARCTICDEM) {
+			double arctic = this.arcticDem.sampleElevationMeters(blockX, blockZ, worldScale);
+			if (!Double.isNaN(arctic)) {
+				return arctic;
+			}
 		}
 
 		int step = downsampleStep(worldScale, RESOLUTION_METERS);
@@ -80,8 +117,21 @@ public final class TellusElevationSource {
 	}
 
 	public void prefetchTiles(double blockX, double blockZ, double worldScale, int radius) {
+		prefetchTiles(blockX, blockZ, worldScale, radius, EarthGeneratorSettings.DEFAULT.demProvider());
+	}
+
+	public void prefetchTiles(
+			double blockX,
+			double blockZ,
+			double worldScale,
+			int radius,
+			EarthGeneratorSettings.DemProvider demProvider
+	) {
 		if (worldScale <= 0.0) {
 			return;
+		}
+		if (demProvider == EarthGeneratorSettings.DemProvider.ARCTICDEM) {
+			this.arcticDem.prefetchTiles(blockX, blockZ, worldScale, radius);
 		}
 		int step = downsampleStep(worldScale, RESOLUTION_METERS);
 		if (step > 1) {
@@ -197,28 +247,40 @@ public final class TellusElevationSource {
 
 	private ShortRaster getTile(@NonNull TileKey key) {
 		try {
-			return this.cache.get(key);
+			ShortRaster raster = this.cache.get(key);
+			return raster == MISSING_RASTER ? null : raster;
 		} catch (Exception e) {
 			Tellus.LOGGER.warn("Failed to load elevation tile {}", key, e);
 			return null;
 		}
 	}
 
-	private ShortRaster loadTile(@NonNull TileKey key) throws IOException {
+	private ShortRaster loadTile(@NonNull TileKey key) {
 		Path cachePath = this.cacheRoot.resolve(key.zoom() + "/" + key.x() + "/" + key.y() + ".png");
 		if (Files.exists(cachePath)) {
 			try (InputStream input = Files.newInputStream(cachePath)) {
 				return readPngRaster(input);
+			} catch (IOException e) {
+				handleInvalidTile(cachePath, key, e);
 			}
 		}
-		byte[] data = downloadTile(key);
+		byte[] data;
+		try {
+			data = downloadTile(key);
+		} catch (IOException e) {
+			Tellus.LOGGER.debug("Failed to download elevation tile {}", key, e);
+			return MISSING_RASTER;
+		}
 		if (data == null) {
-			return null;
+			return MISSING_RASTER;
 		}
 
 		cacheTile(cachePath, data);
 		try (InputStream input = new ByteArrayInputStream(data)) {
 			return readPngRaster(input);
+		} catch (IOException e) {
+			handleInvalidTile(cachePath, key, e);
+			return MISSING_RASTER;
 		}
 	}
 
@@ -243,6 +305,15 @@ public final class TellusElevationSource {
 		} catch (IOException e) {
 			Tellus.LOGGER.warn("Failed to cache elevation tile {}", cachePath, e);
 		}
+	}
+
+	private void handleInvalidTile(Path cachePath, TileKey key, IOException cause) {
+		try {
+			Files.deleteIfExists(cachePath);
+		} catch (IOException deleteError) {
+			Tellus.LOGGER.debug("Failed to delete invalid elevation tile cache {}", cachePath, deleteError);
+		}
+		Tellus.LOGGER.debug("Ignoring invalid elevation tile {} at {}", key, cachePath, cause);
 	}
 
 	private double sampleBilinearAcrossTiles(

@@ -9,11 +9,13 @@ import com.seibel.distanthorizons.api.methods.events.sharedParameterObjects.DhAp
 import com.seibel.distanthorizons.api.objects.DhApiResult;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.server.level.ServerLevel;
 import org.slf4j.Logger;
 
 public final class DistantHorizonsIntegration {
 	private static final Logger LOGGER = LogUtils.getLogger();
+	private static final String VOXY_MOD_ID = "voxy";
 
 	private DistantHorizonsIntegration() {
 	}
@@ -59,6 +61,10 @@ public final class DistantHorizonsIntegration {
 				&& level.getChunkSource().getGenerator() instanceof final EarthChunkGenerator generator
 		) {
 			EarthGeneratorSettings settings = generator.settings();
+			if (settings.voxyChunkPregenEnabled() && FabricLoader.getInstance().isModLoaded(VOXY_MOD_ID)) {
+				LOGGER.info("Voxy pregen enabled; skipping Tellus Distant Horizons integration override");
+				return;
+			}
 			if (settings.distantHorizonsRenderMode() == EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED) {
 				LOGGER.info("Distant Horizons render mode set to detailed; using chunk-based generator");
 				final TellusChunkLodGenerator chunkGenerator = new TellusChunkLodGenerator(level);

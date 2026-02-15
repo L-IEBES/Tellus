@@ -213,7 +213,8 @@ public final class TerrainPreview implements AutoCloseable {
 						blockX,
 						blockZ,
 						worldScale,
-						oceanZoom
+						oceanZoom,
+						settings.demProvider()
 				);
 				elevations[idx] = elevation;
 				blockHeights[idx] = applyHeightScale(elevation, settings);

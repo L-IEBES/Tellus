@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.ChatFormatting;
 import net.minecraft.util.Util;
 import net.minecraft.client.Minecraft;
@@ -101,6 +102,8 @@ public class EarthCustomizeScreen extends Screen {
 	private static final double ALTITUDE_AUTO_EPSILON = 0.5;
 	private static final double AUTO_SEA_LEVEL = -64.0;
 	private static final double SEA_LEVEL_AUTO_EPSILON = 0.5;
+	private static final @NonNull String DISTANT_HORIZONS_MOD_ID = "distanthorizons";
+	private static final @NonNull String VOXY_MOD_ID = "voxy";
 	private static final @NonNull Identifier DYNAMIC_DIMENSION_TYPE_ID =
 			Objects.requireNonNull(Identifier.fromNamespaceAndPath("tellus", "earth_dynamic"), "dynamicDimensionTypeId");
 	private static final @NonNull ResourceKey<DimensionType> DYNAMIC_DIMENSION_TYPE_KEY =
@@ -121,6 +124,7 @@ public class EarthCustomizeScreen extends Screen {
 		super(TITLE);
 		this.parent = parent;
 		this.categories = createCategories();
+		this.applySettingsToCategories(resolveInitialSettings(worldCreationContext));
 	}
 
 	@Override
@@ -403,6 +407,10 @@ public class EarthCustomizeScreen extends Screen {
 
 	private @NonNull EarthGeneratorSettings buildSettings() {
 		double worldScale = this.findSliderValue("world_scale", EarthGeneratorSettings.DEFAULT.worldScale());
+		EarthGeneratorSettings.DemProvider demProvider = this.findDemProviderValue(
+				"dem_provider",
+				EarthGeneratorSettings.DEFAULT.demProvider()
+		);
 		double terrestrialScale = this.findSliderValue("terrestrial_height_scale",
 				EarthGeneratorSettings.DEFAULT.terrestrialHeightScale());
 		double oceanicScale = this.findSliderValue("oceanic_height_scale", EarthGeneratorSettings.DEFAULT.oceanicHeightScale());
@@ -497,10 +505,25 @@ public class EarthCustomizeScreen extends Screen {
 		boolean realtimeTime = this.findToggleValue("realtime_time", EarthGeneratorSettings.DEFAULT.realtimeTime());
 		boolean realtimeWeather = this.findToggleValue("realtime_weather", EarthGeneratorSettings.DEFAULT.realtimeWeather());
 		boolean historicalSnow = this.findToggleValue("historical_snow", EarthGeneratorSettings.DEFAULT.historicalSnow());
+		boolean voxyChunkPregenEnabled = this.findToggleValue(
+				"voxy_chunk_pregen_enabled",
+				EarthGeneratorSettings.DEFAULT.voxyChunkPregenEnabled()
+		);
+		int voxyChunkPregenMaxRadius = (int) Math.round(this.findSliderValue(
+				"voxy_chunk_pregen_max_radius",
+				EarthGeneratorSettings.DEFAULT.voxyChunkPregenMaxRadius()
+		));
+		int voxyChunkPregenChunksPerTick = (int) Math.round(this.findSliderValue(
+				"voxy_chunk_pregen_chunks_per_tick",
+				EarthGeneratorSettings.DEFAULT.voxyChunkPregenChunksPerTick()
+		));
 		EarthGeneratorSettings.DistantHorizonsRenderMode renderMode = this.findRenderMode(
 				"distant_horizons_render_mode",
 				EarthGeneratorSettings.DEFAULT.distantHorizonsRenderMode()
 		);
+		if (renderMode == EarthGeneratorSettings.DistantHorizonsRenderMode.ULTRA_FAST) {
+			distantHorizonsWaterResolver = false;
+		}
 		return new EarthGeneratorSettings(
 				worldScale,
 				terrestrialScale,
@@ -540,8 +563,138 @@ public class EarthCustomizeScreen extends Screen {
 				realtimeTime,
 				realtimeWeather,
 				historicalSnow,
-				renderMode
+				voxyChunkPregenEnabled,
+				voxyChunkPregenMaxRadius,
+				voxyChunkPregenChunksPerTick,
+				renderMode,
+				demProvider
 		);
+	}
+
+	private static @NonNull EarthGeneratorSettings resolveInitialSettings(@Nullable WorldCreationContext worldCreationContext) {
+		@NonNull EarthGeneratorSettings defaultSettings =
+				Objects.requireNonNull(EarthGeneratorSettings.DEFAULT, "defaultSettings");
+		if (worldCreationContext == null) {
+			return defaultSettings;
+		}
+		@Nullable LevelStem overworld = worldCreationContext.selectedDimensions()
+				.get(LevelStem.OVERWORLD)
+				.orElse(null);
+		if (overworld == null) {
+			return defaultSettings;
+		}
+		ChunkGenerator generator = overworld.generator();
+		if (!(generator instanceof EarthChunkGenerator earthGenerator)) {
+			return defaultSettings;
+		}
+		return Objects.requireNonNull(earthGenerator.settings(), "generatorSettings");
+	}
+
+	private void applySettingsToCategories(@NonNull EarthGeneratorSettings settings) {
+		EarthGeneratorSettings initialSettings = Objects.requireNonNull(settings, "initialSettings");
+		this.spawnLatitude = initialSettings.spawnLatitude();
+		this.spawnLongitude = initialSettings.spawnLongitude();
+
+		this.setSliderValue("world_scale", initialSettings.worldScale());
+		this.setDemProviderValue("dem_provider", initialSettings.demProvider());
+		this.setSliderValue("terrestrial_height_scale", initialSettings.terrestrialHeightScale());
+		this.setSliderValue("oceanic_height_scale", initialSettings.oceanicHeightScale());
+		this.setSliderValue("height_offset", initialSettings.heightOffset());
+		this.setSliderValue(
+				"sea_level",
+				initialSettings.seaLevel() == EarthGeneratorSettings.AUTO_SEA_LEVEL
+						? AUTO_SEA_LEVEL
+						: initialSettings.seaLevel()
+		);
+		this.setSliderValue(
+				"max_altitude",
+				initialSettings.maxAltitude() == EarthGeneratorSettings.AUTO_ALTITUDE
+						? AUTO_MAX_ALTITUDE
+						: initialSettings.maxAltitude()
+		);
+		this.setSliderValue(
+				"min_altitude",
+				initialSettings.minAltitude() == EarthGeneratorSettings.AUTO_ALTITUDE
+						? AUTO_MIN_ALTITUDE
+						: initialSettings.minAltitude()
+		);
+		this.setSliderValue("river_lake_shoreline_blend", initialSettings.riverLakeShorelineBlend());
+		this.setSliderValue("ocean_shoreline_blend", initialSettings.oceanShorelineBlend());
+		this.setToggleValue("shoreline_blend_cliff_limit", initialSettings.shorelineBlendCliffLimit());
+		this.setToggleValue("cave_generation", initialSettings.caveGeneration());
+		this.setToggleValue("ore_distribution", initialSettings.oreDistribution());
+		this.setToggleValue("lava_pools", initialSettings.lavaPools());
+		this.setToggleValue("deep_dark", initialSettings.deepDark());
+		this.setToggleValue("geodes", initialSettings.geodes());
+		this.setToggleValue("add_strongholds", initialSettings.addStrongholds());
+		this.setToggleValue("add_villages", initialSettings.addVillages());
+		this.setToggleValue("add_mineshafts", initialSettings.addMineshafts());
+		this.setToggleValue("add_ocean_monuments", initialSettings.addOceanMonuments());
+		this.setToggleValue("add_woodland_mansions", initialSettings.addWoodlandMansions());
+		this.setToggleValue("add_desert_temples", initialSettings.addDesertTemples());
+		this.setToggleValue("add_jungle_temples", initialSettings.addJungleTemples());
+		this.setToggleValue("add_pillager_outposts", initialSettings.addPillagerOutposts());
+		this.setToggleValue("add_ruined_portals", initialSettings.addRuinedPortals());
+		this.setToggleValue("add_shipwrecks", initialSettings.addShipwrecks());
+		this.setToggleValue("add_ocean_ruins", initialSettings.addOceanRuins());
+		this.setToggleValue("add_buried_treasure", initialSettings.addBuriedTreasure());
+		this.setToggleValue("add_igloos", initialSettings.addIgloos());
+		this.setToggleValue("add_witch_huts", initialSettings.addWitchHuts());
+		this.setToggleValue("add_ancient_cities", initialSettings.addAncientCities());
+		this.setToggleValue("add_trial_chambers", initialSettings.addTrialChambers());
+		this.setToggleValue("add_trail_ruins", initialSettings.addTrailRuins());
+		this.setToggleValue("distant_horizons_water_resolver", initialSettings.distantHorizonsWaterResolver());
+		this.setToggleValue("realtime_time", initialSettings.realtimeTime());
+		this.setToggleValue("realtime_weather", initialSettings.realtimeWeather());
+		this.setToggleValue("historical_snow", initialSettings.historicalSnow());
+		this.setToggleValue("voxy_chunk_pregen_enabled", initialSettings.voxyChunkPregenEnabled());
+		this.setSliderValue("voxy_chunk_pregen_max_radius", initialSettings.voxyChunkPregenMaxRadius());
+		this.setSliderValue("voxy_chunk_pregen_chunks_per_tick", initialSettings.voxyChunkPregenChunksPerTick());
+		this.setRenderModeValue("distant_horizons_render_mode", initialSettings.distantHorizonsRenderMode());
+	}
+
+	private void setSliderValue(String key, double value) {
+		for (CategoryDefinition category : this.categories) {
+			for (SettingDefinition setting : category.getSettings()) {
+				if (setting instanceof SliderDefinition slider && slider.key.equals(key)) {
+					slider.value = Mth.clamp(value, slider.min, slider.max);
+					return;
+				}
+			}
+		}
+	}
+
+	private void setToggleValue(String key, boolean value) {
+		for (CategoryDefinition category : this.categories) {
+			for (SettingDefinition setting : category.getSettings()) {
+				if (setting instanceof ToggleDefinition toggle && toggle.key.equals(key)) {
+					toggle.value = value;
+					return;
+				}
+			}
+		}
+	}
+
+	private void setRenderModeValue(String key, EarthGeneratorSettings.DistantHorizonsRenderMode value) {
+		for (CategoryDefinition category : this.categories) {
+			for (SettingDefinition setting : category.getSettings()) {
+				if (setting instanceof ModeDefinition mode && mode.key.equals(key)) {
+					mode.value = value;
+					return;
+				}
+			}
+		}
+	}
+
+	private void setDemProviderValue(String key, EarthGeneratorSettings.DemProvider value) {
+		for (CategoryDefinition category : this.categories) {
+			for (SettingDefinition setting : category.getSettings()) {
+				if (setting instanceof DemProviderDefinition provider && provider.key.equals(key)) {
+					provider.value = value;
+					return;
+				}
+			}
+		}
 	}
 
 	private double findSliderValue(String key, double fallback) {
@@ -580,26 +733,43 @@ public class EarthCustomizeScreen extends Screen {
 		return fallback;
 	}
 
+	private EarthGeneratorSettings.DemProvider findDemProviderValue(
+			String key,
+			EarthGeneratorSettings.DemProvider fallback
+	) {
+		for (CategoryDefinition category : this.categories) {
+			for (SettingDefinition setting : category.getSettings()) {
+				if (setting instanceof DemProviderDefinition provider && provider.key.equals(key)) {
+					return provider.value;
+				}
+			}
+		}
+		return fallback;
+	}
+
 	@Override
 	public void render(@NonNull GuiGraphics graphics, int mouseX, int mouseY, float delta) {
 		super.render(graphics, mouseX, mouseY, delta);
 		graphics.drawCenteredString(this.font, this.title, this.width / 2, 20, 0xFFFFFF);
 	}
 
-	private static List<CategoryDefinition> createCategories() {
+	private List<CategoryDefinition> createCategories() {
 		List<CategoryDefinition> categories = new ArrayList<>();
+		boolean distantHorizonsInstalled = FabricLoader.getInstance().isModLoaded(DISTANT_HORIZONS_MOD_ID);
+		boolean voxyInstalled = FabricLoader.getInstance().isModLoaded(VOXY_MOD_ID);
 
 		categories.add(new CategoryDefinition("world", List.of(
 				slider("world_scale", 35.0, 1.0, 500.0, 5.0)
 						.withDisplay(EarthCustomizeScreen::formatWorldScale)
 						.withScale(SliderScale.power(3.0)),
+				demProvider("dem_provider", EarthGeneratorSettings.DEFAULT.demProvider()),
 				slider("terrestrial_height_scale", 1.0, 0.0, 50.0, 0.5)
 						.withDisplay(EarthCustomizeScreen::formatMultiplier)
 						.withScale(SliderScale.power(3.0)),
 				slider("oceanic_height_scale", 1.0, 0.0, 50.0, 0.5)
 						.withDisplay(EarthCustomizeScreen::formatMultiplier)
 						.withScale(SliderScale.power(3.0)),
-				slider("height_offset", EarthGeneratorSettings.DEFAULT.heightOffset(), -63.0, 128.0, 1.0)
+				slider("height_offset", EarthGeneratorSettings.DEFAULT.heightOffset(), -2000.0, 128.0, 1.0)
 						.withDisplay(EarthCustomizeScreen::formatHeightOffset),
 				slider("sea_level", AUTO_SEA_LEVEL, AUTO_SEA_LEVEL, 256.0, 1.0)
 						.withDisplay(EarthCustomizeScreen::formatSeaLevel),
@@ -661,11 +831,51 @@ public class EarthCustomizeScreen extends Screen {
 				toggle("historical_snow", EarthGeneratorSettings.DEFAULT.historicalSnow())
 		)));
 
-		categories.add(new CategoryDefinition("compatibility", List.of(
-				mode("distant_horizons_render_mode", EarthGeneratorSettings.DEFAULT.distantHorizonsRenderMode()),
-				toggle("distant_horizons_water_resolver", EarthGeneratorSettings.DEFAULT.distantHorizonsWaterResolver()),
-				comingSoonButton()
-		)));
+		@NonNull CategoryDefinition distantHorizonsCategory = Objects.requireNonNull(
+				new CategoryDefinition("distant_horizons", List.of(
+						mode("distant_horizons_render_mode", EarthGeneratorSettings.DEFAULT.distantHorizonsRenderMode()),
+						toggle("distant_horizons_water_resolver", EarthGeneratorSettings.DEFAULT.distantHorizonsWaterResolver())
+				)).hideFromRoot().parent("compatibility"),
+				"distantHorizonsCategory"
+		);
+		@NonNull CategoryDefinition voxyCategory = Objects.requireNonNull(
+				new CategoryDefinition("voxy", List.of(
+						toggle("voxy_chunk_pregen_enabled", EarthGeneratorSettings.DEFAULT.voxyChunkPregenEnabled()),
+						slider("voxy_chunk_pregen_max_radius", EarthGeneratorSettings.DEFAULT.voxyChunkPregenMaxRadius(), 0.0, 512.0, 1.0)
+								.withDisplay(EarthCustomizeScreen::formatChunkRadius),
+						slider("voxy_chunk_pregen_chunks_per_tick", EarthGeneratorSettings.DEFAULT.voxyChunkPregenChunksPerTick(), 1.0, 200.0, 1.0)
+								.withDisplay(EarthCustomizeScreen::formatChunksPerTick)
+				)).hideFromRoot().parent("compatibility"),
+				"voxyCategory"
+		);
+		if (!distantHorizonsInstalled) {
+			disableCategoryForMissingMod(distantHorizonsCategory, DISTANT_HORIZONS_MOD_ID);
+		}
+		if (!voxyInstalled) {
+			disableCategoryForMissingMod(voxyCategory, VOXY_MOD_ID);
+		}
+
+		List<SettingDefinition> compatibilitySettings = new ArrayList<>();
+		compatibilitySettings.add(
+				categoryLink(distantHorizonsCategory)
+						.active(distantHorizonsInstalled)
+						.withTooltip(distantHorizonsInstalled ? null : requiresModTooltip(DISTANT_HORIZONS_MOD_ID))
+		);
+		compatibilitySettings.add(
+				categoryLink(voxyCategory)
+						.active(voxyInstalled)
+						.withTooltip(voxyInstalled ? null : requiresModTooltip(VOXY_MOD_ID))
+		);
+		if (distantHorizonsInstalled && voxyInstalled) {
+			compatibilitySettings.add(infoSubtle(Component.translatable("tellus.compatibility.both_mods_warning")));
+			compatibilitySettings.add(infoSubtle(Component.translatable("tellus.compatibility.priority_warning")));
+			compatibilitySettings.add(infoSubtle(Component.translatable("tellus.compatibility.exclusive_warning")));
+		}
+		compatibilitySettings.add(comingSoonButton());
+
+		categories.add(new CategoryDefinition("compatibility", compatibilitySettings));
+		categories.add(distantHorizonsCategory);
+		categories.add(voxyCategory);
 
 		categories.add(new CategoryDefinition("cache", List.of(
 				cacheEntry(CacheMetric.OSM, true),
@@ -697,11 +907,39 @@ public class EarthCustomizeScreen extends Screen {
 		return new ToggleDefinition(key, defaultValue);
 	}
 
+	private static DemProviderDefinition demProvider(
+			String key,
+			EarthGeneratorSettings.DemProvider defaultValue
+	) {
+		return new DemProviderDefinition(key, defaultValue);
+	}
+
 	private static ModeDefinition mode(
 			String key,
 			EarthGeneratorSettings.DistantHorizonsRenderMode defaultValue
 	) {
 		return new ModeDefinition(key, defaultValue);
+	}
+
+	private CategoryLinkDefinition categoryLink(@NonNull CategoryDefinition targetCategory) {
+		return new CategoryLinkDefinition(targetCategory);
+	}
+
+	private static void disableCategoryForMissingMod(@NonNull CategoryDefinition category, @NonNull String modId) {
+		Component tooltip = requiresModTooltip(modId);
+		for (SettingDefinition setting : category.getSettings()) {
+			if (setting instanceof ModeDefinition mode) {
+				mode.unavailable(tooltip);
+				continue;
+			}
+			if (setting instanceof ToggleDefinition toggle) {
+				toggle.unavailable(tooltip);
+				continue;
+			}
+			if (setting instanceof SliderDefinition slider) {
+				slider.unavailable(tooltip);
+			}
+		}
 	}
 
 	private static ButtonDefinition comingSoonButton() {
@@ -797,6 +1035,10 @@ public class EarthCustomizeScreen extends Screen {
 		return new TextLineDefinition(Component.literal(text), INFO_SUBTLE_COLOR, null);
 	}
 
+	private static TextLineDefinition infoSubtle(@NonNull Component text) {
+		return new TextLineDefinition(text, INFO_SUBTLE_COLOR, null);
+	}
+
 	private static TextLineDefinition infoLink(@NonNull String url) {
 		return new TextLineDefinition(Component.literal(url), INFO_LINK_COLOR, url);
 	}
@@ -837,6 +1079,14 @@ public class EarthCustomizeScreen extends Screen {
 		return String.format(Locale.ROOT, "%.0f%%", value);
 	}
 
+	private static String formatChunkRadius(double value) {
+		return String.format(Locale.ROOT, "%.0f chunks", value);
+	}
+
+	private static String formatChunksPerTick(double value) {
+		return String.format(Locale.ROOT, "%.0f chunks/tick", value);
+	}
+
 	private static String formatMaxAltitude(double value) {
 		return formatAltitude(value, AUTO_MAX_ALTITUDE);
 	}
@@ -849,6 +1099,13 @@ public class EarthCustomizeScreen extends Screen {
 		return Objects.requireNonNull(
 				Component.translatable("property.tellus.distant_horizons_render_mode.value." + mode.id()),
 				"renderModeLabel"
+		);
+	}
+
+	private static @NonNull Component formatDemProvider(EarthGeneratorSettings.DemProvider provider) {
+		return Objects.requireNonNull(
+				Component.translatable("property.tellus.dem_provider.value." + provider.id()),
+				"demProviderLabel"
 		);
 	}
 
@@ -887,6 +1144,23 @@ public class EarthCustomizeScreen extends Screen {
 				Component.translatable("property.tellus." + key + ".tooltip").withStyle(ChatFormatting.GRAY),
 				"settingTooltip"
 		);
+	}
+
+	private static @NonNull Component requiresModTooltip(@NonNull String modId) {
+		return Objects.requireNonNull(
+				Component.translatable("tellus.compatibility.requires_mod", compatibilityModName(modId))
+						.withStyle(ChatFormatting.GRAY),
+				"requiresModTooltip"
+		);
+	}
+
+	private static @NonNull Component compatibilityModName(@NonNull String modId) {
+		return switch (modId) {
+			case DISTANT_HORIZONS_MOD_ID ->
+					Objects.requireNonNull(Component.translatable("tellus.compatibility.mod.distant_horizons"), "modName");
+			case VOXY_MOD_ID -> Objects.requireNonNull(Component.translatable("tellus.compatibility.mod.voxy"), "modName");
+			default -> Objects.requireNonNull(Component.literal(modId), "modName");
+		};
 	}
 
 	private static @NonNull Component workInProgressTooltip(String key) {
@@ -1038,6 +1312,9 @@ public class EarthCustomizeScreen extends Screen {
 		setPreviewVisible(true);
 		this.list.clear();
 		for (CategoryDefinition category : this.categories) {
+			if (!category.showInRootMenu()) {
+				continue;
+			}
 			Component label = Objects.requireNonNull(category.getLabel(), "categoryLabel");
 			Button button = Button.builder(label, btn -> this.showCategory(category))
 					.bounds(0, 0, this.list.getRowWidth(), ENTRY_HEIGHT)
@@ -1049,23 +1326,175 @@ public class EarthCustomizeScreen extends Screen {
 
 	private void showCategory(CategoryDefinition category) {
 		this.list.clear();
+		@Nullable String parentCategoryId = category.parentCategoryId();
+		@Nullable CategoryDefinition backTarget = parentCategoryId == null ? null : this.findCategoryById(parentCategoryId);
 		Component backLabel = Objects.requireNonNull(Component.translatable("gui.back"), "backLabel");
-		Button back = Button.builder(backLabel, btn -> this.showCategories())
+		Button back = Button.builder(backLabel, btn -> {
+			if (backTarget != null) {
+				this.showCategory(backTarget);
+				return;
+			}
+			this.showCategories();
+		})
 				.bounds(0, 0, this.list.getRowWidth(), ENTRY_HEIGHT)
 				.build();
 		this.list.addWidget(back);
 
 		boolean hidePreview = isPreviewHiddenCategory(category.getId());
 		setPreviewVisible(!hidePreview);
+		applyCategoryConstraints(category);
 
 		if ("cache".equals(category.getId())) {
 			CacheManager.requestRefresh();
 		}
+		if ("world".equals(category.getId())) {
+			this.list.addWidget(this.createWorldHeaderActions(category));
+		}
+		if ("structure".equals(category.getId())) {
+			this.list.addWidget(this.createStructureHeaderActions(category));
+		}
 
+		Runnable onChange = this::onSettingsChanged;
+		if ("distant_horizons".equals(category.getId()) || "voxy".equals(category.getId())) {
+			onChange = () -> {
+				this.onSettingsChanged();
+				this.showCategory(category);
+			};
+		}
 		for (SettingDefinition setting : category.getSettings()) {
-			this.list.addWidget(setting.createWidget(this::onSettingsChanged));
+			this.list.addWidget(setting.createWidget(onChange));
 		}
 		this.list.setScrollAmount(0.0);
+	}
+
+	private @Nullable CategoryDefinition findCategoryById(@NonNull String id) {
+		String targetId = Objects.requireNonNull(id, "id");
+		for (CategoryDefinition category : this.categories) {
+			if (category.getId().equals(targetId)) {
+				return category;
+			}
+		}
+		return null;
+	}
+
+	private @NonNull AbstractWidget createWorldHeaderActions(@NonNull CategoryDefinition category) {
+		@NonNull EarthGeneratorSettings defaultSettings =
+				Objects.requireNonNull(EarthGeneratorSettings.DEFAULT, "defaultSettings");
+		Component restoreDefaultsLabel = Objects.requireNonNull(
+				Component.translatable("gui.tellus.restore_defaults"),
+				"restoreDefaultsLabel"
+		);
+		Component selectPresetLabel = Objects.requireNonNull(
+				Component.translatable("gui.tellus.select_preset"),
+				"selectPresetLabel"
+		);
+		Component comingSoonTooltip = Objects.requireNonNull(
+				Component.translatable("gui.tellus.coming_soon").withStyle(ChatFormatting.GRAY),
+				"selectPresetTooltip"
+		);
+		return new DualButtonWidget(
+				restoreDefaultsLabel,
+				btn -> {
+					this.applySettingsToCategories(defaultSettings);
+					this.onSettingsChanged();
+					this.showCategory(category);
+				},
+				selectPresetLabel,
+				btn -> {
+				},
+				false,
+				comingSoonTooltip
+		);
+	}
+
+	private @NonNull AbstractWidget createStructureHeaderActions(@NonNull CategoryDefinition category) {
+		Component enableAllLabel = Objects.requireNonNull(
+				Component.translatable("gui.tellus.enable_all"),
+				"enableAllLabel"
+		);
+		Component disableAllLabel = Objects.requireNonNull(
+				Component.translatable("gui.tellus.disable_all"),
+				"disableAllLabel"
+		);
+		return new DualButtonWidget(
+				enableAllLabel,
+				btn -> {
+					this.setCategoryToggleValues(category, true);
+					this.onSettingsChanged();
+					this.showCategory(category);
+				},
+				disableAllLabel,
+				btn -> {
+					this.setCategoryToggleValues(category, false);
+					this.onSettingsChanged();
+					this.showCategory(category);
+				},
+				true,
+				null
+		);
+	}
+
+	private void setCategoryToggleValues(@NonNull CategoryDefinition category, boolean value) {
+		for (SettingDefinition setting : category.getSettings()) {
+			if (setting instanceof ToggleDefinition toggle && !toggle.locked && !toggle.unavailable) {
+				toggle.value = value;
+			}
+		}
+	}
+
+	private void applyCategoryConstraints(CategoryDefinition category) {
+		boolean bothCompatibilityModsInstalled = FabricLoader.getInstance().isModLoaded(DISTANT_HORIZONS_MOD_ID)
+				&& FabricLoader.getInstance().isModLoaded(VOXY_MOD_ID);
+		boolean voxyEnabled = bothCompatibilityModsInstalled
+				&& this.findToggleValue("voxy_chunk_pregen_enabled", EarthGeneratorSettings.DEFAULT.voxyChunkPregenEnabled());
+
+		if ("distant_horizons".equals(category.getId())) {
+			ModeDefinition renderMode = null;
+			ToggleDefinition waterResolver = null;
+			for (SettingDefinition setting : category.getSettings()) {
+				if (setting instanceof ModeDefinition mode && mode.key.equals("distant_horizons_render_mode")) {
+					renderMode = mode;
+				}
+				if (setting instanceof ToggleDefinition toggle && toggle.key.equals("distant_horizons_water_resolver")) {
+					waterResolver = toggle;
+				}
+			}
+			if (renderMode == null || waterResolver == null) {
+				return;
+			}
+			boolean blockedByVoxy = bothCompatibilityModsInstalled && voxyEnabled;
+			boolean ultraFast = renderMode.value == EarthGeneratorSettings.DistantHorizonsRenderMode.ULTRA_FAST;
+			renderMode.forceDisabled(blockedByVoxy);
+			waterResolver.forceDisabled(ultraFast || blockedByVoxy);
+			if (ultraFast) {
+				waterResolver.value = false;
+			}
+			return;
+		}
+
+		if (!"voxy".equals(category.getId())) {
+			return;
+		}
+		ToggleDefinition enabled = null;
+		SliderDefinition maxRadius = null;
+		SliderDefinition chunksPerTick = null;
+		for (SettingDefinition setting : category.getSettings()) {
+			if (setting instanceof ToggleDefinition toggle && toggle.key.equals("voxy_chunk_pregen_enabled")) {
+				enabled = toggle;
+			}
+			if (setting instanceof SliderDefinition slider && slider.key.equals("voxy_chunk_pregen_max_radius")) {
+				maxRadius = slider;
+			}
+			if (setting instanceof SliderDefinition slider && slider.key.equals("voxy_chunk_pregen_chunks_per_tick")) {
+				chunksPerTick = slider;
+			}
+		}
+		if (enabled == null || maxRadius == null || chunksPerTick == null) {
+			return;
+		}
+		boolean disable = !enabled.value;
+		maxRadius.forceDisabled(disable);
+		chunksPerTick.forceDisabled(disable);
 	}
 
 	private static boolean isPreviewHiddenCategory(String id) {
@@ -1113,10 +1542,22 @@ public class EarthCustomizeScreen extends Screen {
 	private static final class CategoryDefinition {
 		private final String id;
 		private final List<SettingDefinition> settings;
+		private boolean showInRootMenu = true;
+		private @Nullable String parentCategoryId;
 
 		private CategoryDefinition(String id, List<SettingDefinition> settings) {
 			this.id = id;
 			this.settings = settings;
+		}
+
+		private CategoryDefinition hideFromRoot() {
+			this.showInRootMenu = false;
+			return this;
+		}
+
+		private CategoryDefinition parent(@NonNull String parentCategoryId) {
+			this.parentCategoryId = Objects.requireNonNull(parentCategoryId, "parentCategoryId");
+			return this;
 		}
 
 		private String getId() {
@@ -1142,12 +1583,56 @@ public class EarthCustomizeScreen extends Screen {
 			return this.settings;
 		}
 
+		private boolean showInRootMenu() {
+			return this.showInRootMenu;
+		}
+
+		private @Nullable String parentCategoryId() {
+			return this.parentCategoryId;
+		}
+
+	}
+
+	private final class CategoryLinkDefinition implements SettingDefinition {
+		private final @NonNull CategoryDefinition targetCategory;
+		private boolean active = true;
+		private @Nullable Component tooltip;
+
+		private CategoryLinkDefinition(@NonNull CategoryDefinition targetCategory) {
+			this.targetCategory = Objects.requireNonNull(targetCategory, "targetCategory");
+		}
+
+		private CategoryLinkDefinition active(boolean active) {
+			this.active = active;
+			return this;
+		}
+
+		private CategoryLinkDefinition withTooltip(@Nullable Component tooltip) {
+			this.tooltip = tooltip;
+			return this;
+		}
+
+		@Override
+		public AbstractWidget createWidget(Runnable onChange) {
+			Component label = this.targetCategory.getLabel();
+			Button button = Button.builder(label, btn -> showCategory(this.targetCategory))
+					.bounds(0, 0, 0, ENTRY_HEIGHT)
+					.build();
+			button.active = this.active;
+			if (this.tooltip != null) {
+				button.setTooltip(Tooltip.create(this.tooltip));
+			}
+			return button;
+		}
 	}
 
 	private static final class ToggleDefinition implements SettingDefinition {
 		private final String key;
 		private boolean value;
 		private boolean locked;
+		private boolean forceDisabled;
+		private boolean unavailable;
+		private @Nullable Component unavailableTooltip;
 
 		private ToggleDefinition(String key, boolean defaultValue) {
 			this.key = key;
@@ -1159,19 +1644,30 @@ public class EarthCustomizeScreen extends Screen {
 			return this;
 		}
 
+		private ToggleDefinition forceDisabled(boolean forceDisabled) {
+			this.forceDisabled = forceDisabled;
+			return this;
+		}
+
+		private ToggleDefinition unavailable(@NonNull Component tooltip) {
+			this.unavailable = true;
+			this.unavailableTooltip = Objects.requireNonNull(tooltip, "unavailableTooltip");
+			return this;
+		}
+
 		@Override
 		public AbstractWidget createWidget(Runnable onChange) {
 			Component name = settingName(this.key);
-			Component tooltip = this.locked
-					? workInProgressTooltip(this.key)
-					: settingTooltip(this.key);
+			Component tooltip = this.unavailableTooltip != null
+					? this.unavailableTooltip
+					: (this.locked ? workInProgressTooltip(this.key) : settingTooltip(this.key));
 			CycleButton.Builder<Boolean> builder = CycleButton.booleanBuilder(YES, NO, this.value)
 					.withTooltip(value -> Tooltip.create(tooltip));
 			CycleButton<Boolean> button = builder.create(0, 0, 0, ENTRY_HEIGHT, name, (btn, value) -> {
 				this.value = value;
 				onChange.run();
 			});
-			button.active = !this.locked;
+			button.active = !this.locked && !this.forceDisabled && !this.unavailable;
 			return button;
 		}
 	}
@@ -1387,6 +1883,80 @@ public class EarthCustomizeScreen extends Screen {
 		}
 	}
 
+	private static final class DualButtonWidget extends AbstractWidget {
+		private static final int BUTTON_GAP = 4;
+
+		private final Button leftButton;
+		private final Button rightButton;
+
+		private DualButtonWidget(
+				@NonNull Component leftLabel,
+				Button.@NonNull OnPress leftAction,
+				@NonNull Component rightLabel,
+				Button.@NonNull OnPress rightAction,
+				boolean rightActive,
+				@Nullable Component rightTooltip
+		) {
+			super(0, 0, 0, ENTRY_HEIGHT, Component.empty());
+			this.leftButton = Button.builder(
+					Objects.requireNonNull(leftLabel, "leftLabel"),
+					Objects.requireNonNull(leftAction, "leftAction")
+			).bounds(0, 0, 0, ENTRY_HEIGHT).build();
+			this.rightButton = Button.builder(
+					Objects.requireNonNull(rightLabel, "rightLabel"),
+					Objects.requireNonNull(rightAction, "rightAction")
+			).bounds(0, 0, 0, ENTRY_HEIGHT).build();
+			this.rightButton.active = rightActive;
+			if (rightTooltip != null) {
+				this.rightButton.setTooltip(Tooltip.create(rightTooltip));
+			}
+		}
+
+		@Override
+		protected void renderWidget(@NonNull GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+			int leftWidth = Math.max(0, (this.width - BUTTON_GAP) / 2);
+			int rightWidth = Math.max(0, this.width - leftWidth - BUTTON_GAP);
+			int x = this.getX();
+			int y = this.getY();
+
+			this.leftButton.setX(x);
+			this.leftButton.setY(y);
+			this.leftButton.setWidth(leftWidth);
+			this.leftButton.setHeight(this.height);
+
+			this.rightButton.setX(x + leftWidth + BUTTON_GAP);
+			this.rightButton.setY(y);
+			this.rightButton.setWidth(rightWidth);
+			this.rightButton.setHeight(this.height);
+
+			this.leftButton.render(graphics, mouseX, mouseY, delta);
+			this.rightButton.render(graphics, mouseX, mouseY, delta);
+		}
+
+		@Override
+		public boolean mouseClicked(@NonNull MouseButtonEvent event, boolean isPrimary) {
+			boolean leftClicked = this.leftButton.mouseClicked(event, isPrimary);
+			boolean rightClicked = this.rightButton.mouseClicked(event, isPrimary);
+			return leftClicked || rightClicked;
+		}
+
+		@Override
+		protected void onDrag(@NonNull MouseButtonEvent event, double deltaX, double deltaY) {
+			this.leftButton.mouseDragged(event, deltaX, deltaY);
+			this.rightButton.mouseDragged(event, deltaX, deltaY);
+		}
+
+		@Override
+		public void onRelease(@NonNull MouseButtonEvent event) {
+			this.leftButton.mouseReleased(event);
+			this.rightButton.mouseReleased(event);
+		}
+
+		@Override
+		protected void updateWidgetNarration(@NonNull NarrationElementOutput narration) {
+		}
+	}
+
 	private static final class CacheActionWidget extends AbstractWidget {
 		private final Button button;
 
@@ -1586,21 +2156,21 @@ public class EarthCustomizeScreen extends Screen {
 		}
 	}
 
-	private static final class ModeDefinition implements SettingDefinition {
-		private static final @NonNull List<EarthGeneratorSettings.DistantHorizonsRenderMode> MODES = createModes();
+	private static final class DemProviderDefinition implements SettingDefinition {
+		private static final @NonNull List<EarthGeneratorSettings.DemProvider> PROVIDERS = createProviders();
 
 		private final String key;
-		private EarthGeneratorSettings.DistantHorizonsRenderMode value;
+		private EarthGeneratorSettings.DemProvider value;
 		private boolean locked;
 
-		private static @NonNull List<EarthGeneratorSettings.DistantHorizonsRenderMode> createModes() {
-			List<EarthGeneratorSettings.DistantHorizonsRenderMode> modes = new ArrayList<>(2);
-			modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.FAST);
-			modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED);
-			return modes;
+		private static @NonNull List<EarthGeneratorSettings.DemProvider> createProviders() {
+			List<EarthGeneratorSettings.DemProvider> providers = new ArrayList<>(2);
+			providers.add(EarthGeneratorSettings.DemProvider.TERRARIUM);
+			providers.add(EarthGeneratorSettings.DemProvider.ARCTICDEM);
+			return providers;
 		}
 
-		private ModeDefinition(String key, EarthGeneratorSettings.DistantHorizonsRenderMode defaultValue) {
+		private DemProviderDefinition(String key, EarthGeneratorSettings.DemProvider defaultValue) {
 			this.key = key;
 			this.value = defaultValue;
 		}
@@ -1611,11 +2181,11 @@ public class EarthCustomizeScreen extends Screen {
 			Component tooltip = this.locked
 					? workInProgressTooltip(this.key)
 					: settingTooltip(this.key);
-			CycleButton.Builder<EarthGeneratorSettings.DistantHorizonsRenderMode> builder = CycleButton.builder(
-					EarthCustomizeScreen::formatRenderMode,
+			CycleButton.Builder<EarthGeneratorSettings.DemProvider> builder = CycleButton.builder(
+					EarthCustomizeScreen::formatDemProvider,
 					this.value
-			).withValues(MODES).withTooltip(value -> Tooltip.create(tooltip));
-			CycleButton<EarthGeneratorSettings.DistantHorizonsRenderMode> button = builder.create(
+			).withValues(PROVIDERS).withTooltip(value -> Tooltip.create(tooltip));
+			CycleButton<EarthGeneratorSettings.DemProvider> button = builder.create(
 					0,
 					0,
 					0,
@@ -1631,6 +2201,66 @@ public class EarthCustomizeScreen extends Screen {
 		}
 	}
 
+	private static final class ModeDefinition implements SettingDefinition {
+		private static final @NonNull List<EarthGeneratorSettings.DistantHorizonsRenderMode> MODES = createModes();
+
+		private final String key;
+		private EarthGeneratorSettings.DistantHorizonsRenderMode value;
+		private boolean locked;
+		private boolean forceDisabled;
+		private boolean unavailable;
+		private @Nullable Component unavailableTooltip;
+
+		private static @NonNull List<EarthGeneratorSettings.DistantHorizonsRenderMode> createModes() {
+			List<EarthGeneratorSettings.DistantHorizonsRenderMode> modes = new ArrayList<>(3);
+			modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED);
+			modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.FAST);
+			modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.ULTRA_FAST);
+			return modes;
+		}
+
+		private ModeDefinition(String key, EarthGeneratorSettings.DistantHorizonsRenderMode defaultValue) {
+			this.key = key;
+			this.value = defaultValue;
+		}
+
+		private ModeDefinition unavailable(@NonNull Component tooltip) {
+			this.unavailable = true;
+			this.unavailableTooltip = Objects.requireNonNull(tooltip, "unavailableTooltip");
+			return this;
+		}
+
+		private ModeDefinition forceDisabled(boolean forceDisabled) {
+			this.forceDisabled = forceDisabled;
+			return this;
+		}
+
+		@Override
+		public AbstractWidget createWidget(Runnable onChange) {
+			Component name = settingName(this.key);
+			Component tooltip = this.unavailableTooltip != null
+					? this.unavailableTooltip
+					: (this.locked ? workInProgressTooltip(this.key) : settingTooltip(this.key));
+			CycleButton.Builder<EarthGeneratorSettings.DistantHorizonsRenderMode> builder = CycleButton.builder(
+					EarthCustomizeScreen::formatRenderMode,
+					this.value
+			).withValues(MODES).withTooltip(value -> Tooltip.create(tooltip));
+			CycleButton<EarthGeneratorSettings.DistantHorizonsRenderMode> button = builder.create(
+					0,
+					0,
+					0,
+					ENTRY_HEIGHT,
+					name,
+						(btn, value) -> {
+							this.value = value;
+							onChange.run();
+						}
+				);
+			button.active = !this.locked && !this.forceDisabled && !this.unavailable;
+			return button;
+		}
+	}
+
 	private static final class SliderDefinition implements SettingDefinition {
 		private final String key;
 		private final double min;
@@ -1640,6 +2270,9 @@ public class EarthCustomizeScreen extends Screen {
 		private DoubleFunction<String> display;
 		private SliderScale scale = SliderScale.linear();
 		private boolean locked;
+		private boolean forceDisabled;
+		private boolean unavailable;
+		private @Nullable Component unavailableTooltip;
 
 		private SliderDefinition(String key, double defaultValue, double min, double max, double step) {
 			this.key = key;
@@ -1664,14 +2297,25 @@ public class EarthCustomizeScreen extends Screen {
 			return this;
 		}
 
+		private SliderDefinition forceDisabled(boolean forceDisabled) {
+			this.forceDisabled = forceDisabled;
+			return this;
+		}
+
+		private SliderDefinition unavailable(@NonNull Component tooltip) {
+			this.unavailable = true;
+			this.unavailableTooltip = Objects.requireNonNull(tooltip, "unavailableTooltip");
+			return this;
+		}
+
 		@Override
 		public AbstractWidget createWidget(Runnable onChange) {
 			EarthSlider slider = new EarthSlider(0, 0, 0, ENTRY_HEIGHT, this, onChange);
-			Component tooltip = this.locked
-					? workInProgressTooltip(this.key)
-					: settingTooltip(this.key);
+			Component tooltip = this.unavailableTooltip != null
+					? this.unavailableTooltip
+					: (this.locked ? workInProgressTooltip(this.key) : settingTooltip(this.key));
 			slider.setTooltip(Tooltip.create(tooltip));
-			slider.active = !this.locked;
+			slider.active = !this.locked && !this.forceDisabled && !this.unavailable;
 			return slider;
 		}
 	}
