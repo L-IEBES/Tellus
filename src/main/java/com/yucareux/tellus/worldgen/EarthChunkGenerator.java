@@ -81,6 +81,10 @@ import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.material.Fluids;
 import org.jspecify.annotations.NonNull;
+import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import net.minecraft.world.level.levelgen.RandomSupport;
+import net.minecraft.world.level.levelgen.WorldgenRandom;
 
 public final class EarthChunkGenerator extends ChunkGenerator {
 	public static final MapCodec<EarthChunkGenerator> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
@@ -415,6 +419,15 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
 	@Override
 	public void spawnOriginalMobs(@NonNull WorldGenRegion level) {
+		ChunkPos chunkPos = level.getCenter();
+		Holder<Biome> biome = level.getBiome(
+				new BlockPos(chunkPos.getMinBlockX(), level.getMaxY() - 1, chunkPos.getMinBlockZ())
+		);
+
+		WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+		random.setDecorationSeed(level.getSeed(), chunkPos.getMinBlockX(), chunkPos.getMinBlockZ());
+
+		NaturalSpawner.spawnMobsForChunkGeneration(level, biome, chunkPos, random);
 	}
 
 	@Override
